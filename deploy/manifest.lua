@@ -3,7 +3,7 @@
 -- listed below. Bump `version` whenever programs change; in-game
 -- computers pick it up with a single `update`.
 return {
-  version = 6,
+  version = 7,
   files = {
     { path = "fluxdash",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/fluxdash.lua" },

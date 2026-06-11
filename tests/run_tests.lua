@@ -655,7 +655,8 @@ local function deployRig()
       { path = "fluxprobe", url = "https://example.test/fluxprobe.lua" },
       { path = "update", url = "https://example.test/update.lua" },
     },
-    roles = { dash = "fluxdash", wall = "fluxwall" },
+    roles = { dash = "fluxdash", wall = "fluxwall",
+      me = "mesensor", historian = "historian" },
   }]])
   env:addHttp("https://example.test/fluxdash.lua", "-- dash code")
   env:addHttp("https://example.test/fluxwall.lua", "-- wall code")
@@ -678,6 +679,30 @@ T("installer: sets up a wall computer with startup + update pointer", function()
   expectContains(env:file("startup.lua") or "", "fluxwall", "startup.lua")
   expectContains(env:file(".fluxdeploy") or "", MANIFEST_URL, ".fluxdeploy")
   expectContains(env:file(".fluxdeploy") or "", "wall", ".fluxdeploy role")
+end)
+
+T("installer: accepts any role defined in the manifest (me)", function()
+  local env = deployRig()
+  current = env
+  local res = env:run("programs/installer.lua", { "me", MANIFEST_URL },
+    { maxTime = 3 })
+  if res.reason == "error" or res.reason == "compile_error" then
+    fail("installer crashed: " .. tostring(res.err))
+  end
+  expectContains(env:file("startup.lua") or "", "mesensor", "startup.lua")
+  expectContains(env:file(".fluxdeploy") or "", "me", ".fluxdeploy role")
+end)
+
+T("installer: unknown role lists the roles the manifest offers", function()
+  local env = deployRig()
+  current = env
+  env:run("programs/installer.lua", { "reactor", MANIFEST_URL },
+    { maxTime = 3 })
+  expectContains(env:termText(), "Roles:", "terminal")
+  expectContains(env:termText(), "historian", "terminal (role list)")
+  if env:file(".fluxdeploy") then
+    fail(".fluxdeploy written despite unknown role")
+  end
 end)
 
 T("update: re-downloads from the saved manifest and reboots", function()

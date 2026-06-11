@@ -19,15 +19,9 @@ local args = { ... }
 local role = args[1]
 local manifestUrl = args[2] or DEFAULT_MANIFEST
 
-if role ~= "dash" and role ~= "wall" then
-  print("Usage: installer <dash|wall> [manifestUrl]")
-  print("  dash = the computer wired to the ME system")
-  print("  wall = a monitor wall display computer")
-  return
-end
 if manifestUrl:find("__MANIFEST", 1, true) then
   print("No manifest URL baked in - pass one:")
-  print("  installer " .. role .. " <manifestUrl>")
+  print("  installer <role> <manifestUrl>")
   return
 end
 
@@ -58,6 +52,19 @@ local ok, manifest = false, nil
 if chunk then ok, manifest = pcall(chunk) end
 if not ok or type(manifest) ~= "table" or type(manifest.files) ~= "table" then
   print("Bad manifest: " .. tostring(lerr or manifest))
+  return
+end
+
+-- roles live in the manifest, so adding a new sensor never needs an
+-- installer change - it just appears in this list
+local roles = manifest.roles or {}
+if not role or not roles[role] then
+  if role then print("Unknown role '" .. tostring(role) .. "'.") end
+  print("Usage: installer <role> [manifestUrl]")
+  local names = {}
+  for r in pairs(roles) do names[#names + 1] = r end
+  table.sort(names)
+  print("Roles: " .. table.concat(names, ", "))
   return
 end
 
