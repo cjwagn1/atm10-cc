@@ -1,0 +1,8 @@
+# vendored mod sources (shallow clones, re-fetchable)
+vendor/
+
+# local lua toolchain built from source
+toolchain/
+
+# harness scratch output
+fluxscan.txt
