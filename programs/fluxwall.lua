@@ -46,6 +46,32 @@ local function fmt(n)
   return s
 end
 
+local function fmtSpan(sec)
+  if sec ~= sec or sec >= 999 * 86400 then return ">999d" end
+  if sec < 60 then return ("%ds"):format(math.floor(sec)) end
+  if sec < 3600 then return ("%dm"):format(math.floor(sec / 60)) end
+  if sec < 48 * 3600 then
+    return ("%dh %dm"):format(
+      math.floor(sec / 3600), math.floor(sec % 3600 / 60))
+  end
+  return ("%dd %dh"):format(
+    math.floor(sec / 86400), math.floor(sec % 86400 / 3600))
+end
+
+-- "full in 2h 14m" / "empty in 30m"; nil when idle, already full/empty,
+-- or capacity unknown. rate is FE/t (20 ticks per second).
+local function etaText(e, cap, rate)
+  if type(e) ~= "number" or type(rate) ~= "number" then return nil end
+  if rate >= 1 then
+    if not cap or cap <= e then return nil end
+    return "full in " .. fmtSpan((cap - e) / (rate * 20))
+  elseif rate <= -1 then
+    if e <= 0 then return nil end
+    return "empty in " .. fmtSpan(e / (-rate * 20))
+  end
+  return nil
+end
+
 local function openModems()
   local opened = false
   for _, name in ipairs(peripheral.getNames()) do
@@ -134,6 +160,11 @@ local function renderTarget(t, isTerm)
       lineAt(6, ("%s%s FE/t"):format(
         state.rate >= 0 and "+" or "", fmt(state.rate)))
       c(colors.white)
+    end
+    local eta = etaText(e, cap, state.rate)
+    if eta then
+      c(colors.white)
+      lineAt(7, eta)
     end
     if h >= 9 and state.ae and state.aeMax then
       c(colors.lightBlue)

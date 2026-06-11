@@ -443,6 +443,48 @@ T("wall: guidance when no modem attached", function()
   expectContains(env:termText(), "No modem", "terminal")
 end)
 
+-- ------------------------------------------------------------------- eta
+
+T("wall: shows time until empty while draining", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 36, baseH = 18 })
+  -- 72M FE draining at 2k FE/t = 40k FE/s -> 1800s -> 30m
+  local msg = { v = 1, trueE = 72000000, trueCap = 100000000,
+    cells = 1, rate = -2000 }
+  env:rednetAt(1.0, 7, msg, "fluxdash")
+  env:rednetAt(2.0, 7, msg, "fluxdash")
+  current = env
+  env:run(WALL, {}, { maxTime = 3 })
+  expectContains(env:monitorText("monitor_2"), "empty in 30m", "monitor")
+end)
+
+T("wall: shows time until full while charging", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 36, baseH = 18 })
+  -- 72M FE of headroom at +2k FE/t -> 30m
+  local msg = { v = 1, trueE = 28000000, trueCap = 100000000,
+    cells = 1, rate = 2000 }
+  env:rednetAt(1.0, 7, msg, "fluxdash")
+  env:rednetAt(2.0, 7, msg, "fluxdash")
+  current = env
+  env:run(WALL, {}, { maxTime = 3 })
+  expectContains(env:monitorText("monitor_2"), "full in 30m", "monitor")
+end)
+
+T("v5: fluxdash terminal shows ETA from true totals", function()
+  -- 64k cell: 16.87G of headroom at 2.5k FE/t -> ~337,400s -> 3d 21h
+  local env = rig{ accessor = false }
+  env:addFluxDrive("block_reader_0", {
+    cells = { { id = "appflux:fe_64k_cell", energy = 51847398108 } },
+    ratePerSec = 50000,
+  })
+  current = env
+  env:run(V2, {}, { maxTime = 5.5 })
+  expectContains(env:termText(), "full in 3d 21h", "terminal")
+end)
+
 -- ------------------------------------------------------------ deployment
 
 local MANIFEST_URL = "https://example.test/deploy/manifest.lua"
