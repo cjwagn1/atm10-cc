@@ -16,7 +16,11 @@ local function fetch(url)
   if not http then
     return nil, "http API is disabled on this server"
   end
-  local h, err = http.get(url)
+  -- cache-buster: github's raw CDN caches ~5 min; a unique query string
+  -- makes it fetch fresh, so updates apply the moment they're pushed
+  local bust = url .. (url:find("?", 1, true) and "&" or "?")
+    .. "cb=" .. tostring(os.epoch("utc"))
+  local h, err = http.get(bust)
   if not h then return nil, err end
   local body = h.readAll()
   h.close()

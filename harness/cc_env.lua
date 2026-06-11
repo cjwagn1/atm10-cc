@@ -693,6 +693,9 @@ local function buildSandbox(env)
   -- -------------------------------------------------------------- http
   G.http = {
     get = function(url)
+      -- the mock ignores query strings (cache-busters etc), like a server
+      -- that serves the same content regardless of params
+      url = url:gsub("%?.*$", "")
       local body = env.httpFiles[url]
       if not body then
         return nil, "Could not connect (mock has no " .. tostring(url) .. ")"
