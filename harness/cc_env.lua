@@ -206,6 +206,7 @@ function M.new(opts)
   self.rednetSent = {}       -- log of rednet.broadcast/send calls
   self.rednetOpen = {}       -- side -> true
   self.httpFiles = {}        -- url -> body served by the http mock
+  self.chatLog = {}          -- messages sent through a chat_box
   self.advanced = opts.advanced ~= false
   self.strictColors = opts.strictColors or false
   -- exact string confirmed in-game on Carter's ATM10 v7.0 server
@@ -268,6 +269,12 @@ function Env:snapshotAt(seconds, key)
   end })
 end
 
+function Env:monitorSnapshotAt(seconds, key, name)
+  self:scheduleAt(seconds, { fn = function()
+    self.snapshots[key] = self:monitorText(name)
+  end })
+end
+
 -- Deliver an incoming rednet message at t (the bios rednet daemon turns
 -- modem traffic into "rednet_message" events; programs listen for those).
 function Env:rednetAt(seconds, senderId, message, protocol)
@@ -325,7 +332,29 @@ function Env:addMeBridge(name, o)
     getAverageEnergyInput = function() return o.input or 0 end,
     isConnected = function() return true end,
     isOnline = function() return true end,
-    getTotalItemStorage = function() return 0 end,
+    getTotalItemStorage = function() return o.totalItemStorage or 0 end,
+    getUsedItemStorage = function() return o.usedItemStorage or 0 end,
+    getAvailableItemStorage = function()
+      return (o.totalItemStorage or 0) - (o.usedItemStorage or 0)
+    end,
+    -- shape per AP AEApi.parseCraftingCPU: {storage, coProcessors, isBusy, name}
+    getCraftingCPUs = function() return o.cpus or {} end,
+  })
+end
+
+-- AP Chat Box (type "chat_box"); messages land in env.chatLog
+function Env:addChatBox(name)
+  local env = self
+  return self:addPeripheral(name, { "chat_box" }, {
+    sendMessage = function(msg, prefix)
+      env.chatLog[#env.chatLog + 1] = { msg = msg, prefix = prefix }
+      return true
+    end,
+    sendMessageToPlayer = function(msg, player, prefix)
+      env.chatLog[#env.chatLog + 1] =
+        { msg = msg, player = player, prefix = prefix }
+      return true
+    end,
   })
 end
 

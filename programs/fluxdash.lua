@@ -326,14 +326,18 @@ local function sample()
     state.aeIn = ok4 and tonumber(aeIn) or nil
   end
 
-  -- feed any fluxwall displays listening on the network
+  -- telemetry mesh envelope: every sensor publishes
+  -- { v, source, tick, data } on the shared "telemetry" protocol
   pcall(rednet.broadcast, {
-    v = 1, e = state.e, cap = state.cap,
-    trueE = state.trueE, trueCap = state.trueCap, cells = state.cells,
-    rate = state.rate, srcName = fluxName,
-    ae = state.ae, aeMax = state.aeMax,
-    aeUse = state.aeUse, aeIn = state.aeIn,
-  }, "fluxdash")
+    v = 1, source = "flux", tick = os.clock(),
+    data = {
+      e = state.e, cap = state.cap,
+      trueE = state.trueE, trueCap = state.trueCap, cells = state.cells,
+      rate = state.rate, srcName = fluxName,
+      ae = state.ae, aeMax = state.aeMax,
+      aeUse = state.aeUse, aeIn = state.aeIn,
+    },
+  }, "telemetry")
 end
 
 local function renderTarget(t, isTerm)

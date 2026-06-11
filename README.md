@@ -82,14 +82,28 @@ version; in-game, type `update` on any computer.
 (Why GitHub raw: CC's default HTTP rules are `DENY $private, ALLOW *` —
 public URLs work out of the box, LAN hosting would need a config edit.)
 
-## fluxwall (monitor wall)
+## Telemetry mesh
 
-`fluxdash` broadcasts its state over rednet every refresh; `fluxwall`
-listens (protocol "fluxdash") and renders a big auto-scaled layout on
-every attached monitor: headline FE, capacity + percent, bar, rate, AE
-stats if room, a spinner that ticks on each received packet, and a red
-"NO SIGNAL (Ns)" banner if the feed goes quiet for 10s. Pair wireless or
-ender modems on both computers (ender = unlimited range, cross-dimension).
+One pub/sub envelope on rednet protocol `"telemetry"`:
+`{ v, source, tick, data }`. Every sensor is a cheap computer + modem;
+displays and the historian subscribe. Current roles:
+
+- **dash** (`fluxdash`) — the original dashboard, publishes source `flux`
+- **me** (`mesensor`) — ME Bridge stats: storage bytes, craft CPU
+  busy/total, AE draw; publishes source `me`
+- **wall** (`fluxwall`) — multi-source display: one auto-rotating page per
+  source (8s, or `n` to flip), purpose-built layouts for `flux`/`me`,
+  generic key/value page for any new source (new sensors need zero wall
+  changes), sparkline row on tall monitors, per-source "NO SIGNAL (Ns)",
+  red banner when the historian raises an alert
+- **historian** (`historian`) — subscribes to everything; persists rings
+  to `telemetry/<source>.log`; alert rules (drop-over-window, silence)
+  announce via an attached Advanced Peripherals **Chat Box** (in-game
+  chat ping) and broadcast as source `alerts` for the wall banner;
+  optional websocket export to `bridge/` (see bridge/README.md)
+
+Legacy note: pre-mesh fluxdash broadcasts (protocol "fluxdash") are still
+accepted by the wall, so update order never matters.
 
 ## Roadmap
 

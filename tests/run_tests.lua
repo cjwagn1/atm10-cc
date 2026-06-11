@@ -371,7 +371,7 @@ end)
 
 local WALL = "programs/fluxwall.lua"
 
-T("v4: fluxdash broadcasts state over rednet each refresh", function()
+T("v6: fluxdash broadcasts telemetry envelopes each refresh", function()
   local env = rig{} -- rig includes a modem on "back"
   env:addFluxDrive("block_reader_0", {
     cells = { { id = "appflux:fe_64k_cell", energy = 51847398108 } },
@@ -382,15 +382,16 @@ T("v4: fluxdash broadcasts state over rednet each refresh", function()
     fail("expected >=3 broadcasts, got " .. #env.rednetSent)
   end
   local last = env.rednetSent[#env.rednetSent]
-  if last.kind ~= "broadcast" then fail("expected broadcast, got " .. last.kind) end
-  if last.protocol ~= "fluxdash" then
-    fail("expected protocol fluxdash, got " .. tostring(last.protocol))
+  if last.protocol ~= "telemetry" then
+    fail("expected protocol telemetry, got " .. tostring(last.protocol))
   end
-  if type(last.message) ~= "table" or last.message.v ~= 1 then
-    fail("message missing version field")
+  local m = last.message
+  if type(m) ~= "table" or m.v ~= 1 or m.source ~= "flux"
+    or type(m.data) ~= "table" then
+    fail("bad envelope shape")
   end
-  if last.message.trueE ~= 51847398108 then
-    fail("message.trueE = " .. tostring(last.message.trueE))
+  if m.data.trueE ~= 51847398108 then
+    fail("envelope data.trueE = " .. tostring(m.data.trueE))
   end
 end)
 
@@ -441,6 +442,162 @@ T("wall: guidance when no modem attached", function()
   current = env
   env:run(WALL, {}, { maxTime = 2 })
   expectContains(env:termText(), "No modem", "terminal")
+end)
+
+-- -------------------------------------------------------- telemetry mesh
+
+local function fluxEnvelope(e)
+  return { v = 1, source = "flux", tick = 0, data = {
+    trueE = e or 2952790016, trueCap = 281474976710656,
+    cells = 1, rate = 489420,
+  } }
+end
+
+local ME_ENVELOPE = { v = 1, source = "me", tick = 0, data = {
+  usedBytes = 612000, totalBytes = 2100000, availBytes = 1488000,
+  cpus = 4, cpusBusy = 1, aeUse = 96.4,
+} }
+
+T("mesh: wall renders flux page from a telemetry envelope", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 36, baseH = 18 })
+  env:rednetAt(1.0, 7, fluxEnvelope(), "telemetry")
+  env:rednetAt(2.0, 7, fluxEnvelope(), "telemetry")
+  current = env
+  env:run(WALL, {}, { maxTime = 3 })
+  expectContains(env:monitorText("monitor_2"), "2.95G FE", "monitor")
+  expectContains(env:monitorText("monitor_2"), "+489.42k FE/t", "monitor")
+end)
+
+T("mesh: wall pages between multiple sources", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 36, baseH = 18 })
+  for t = 1, 13, 2 do
+    env:rednetAt(t, 7, fluxEnvelope(), "telemetry")
+    env:rednetAt(t + 1, 8, ME_ENVELOPE, "telemetry")
+  end
+  env:monitorSnapshotAt(4, "p1", "monitor_2")
+  env:monitorSnapshotAt(12, "p2", "monitor_2")
+  current = env
+  env:run(WALL, {}, { maxTime = 14 })
+  if not env.snapshots.p1 then fail("no p1 snapshot") end
+  expectContains(env.snapshots.p1, "FE", "monitor page 1 (flux)")
+  if not env.snapshots.p2 then fail("no p2 snapshot") end
+  expectContains(env.snapshots.p2, "ME STORAGE", "monitor page 2 (me)")
+end)
+
+T("mesh: wall shows alert banner from the alerts source", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 36, baseH = 18 })
+  env:rednetAt(1.0, 7, fluxEnvelope(), "telemetry")
+  env:rednetAt(2.0, 9, { v = 1, source = "alerts", tick = 0,
+    data = { msg = "flux energy dropped 45% in 5m" } }, "telemetry")
+  env:rednetAt(3.0, 7, fluxEnvelope(), "telemetry")
+  current = env
+  env:run(WALL, {}, { maxTime = 4 })
+  -- 24-char monitor clips the banner; the wide terminal shows it all
+  expectContains(env:monitorText("monitor_2"), "! flux energy dropped",
+    "monitor banner")
+  expectContains(env:termText(), "dropped 45% in 5m", "terminal banner")
+  expectContains(env:monitorText("monitor_2"), "FE", "monitor still shows flux")
+end)
+
+T("mesh: mesensor broadcasts ME storage envelopes", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  env:addMeBridge("me_bridge_0", {
+    stored = 1200000, max = 6400000, usage = 96.4, input = 130,
+    totalItemStorage = 2100000, usedItemStorage = 612000,
+    cpus = {
+      { name = "A", storage = 65536, coProcessors = 2, isBusy = true },
+      { name = "B", storage = 65536, coProcessors = 0, isBusy = false },
+    },
+  })
+  current = env
+  env:run("programs/mesensor.lua", {}, { maxTime = 5.5 })
+  if #env.rednetSent < 2 then
+    fail("expected >=2 broadcasts, got " .. #env.rednetSent)
+  end
+  local m = env.rednetSent[#env.rednetSent].message
+  if m.source ~= "me" then fail("source = " .. tostring(m.source)) end
+  if m.data.usedBytes ~= 612000 then
+    fail("usedBytes = " .. tostring(m.data.usedBytes))
+  end
+  if m.data.cpus ~= 2 or m.data.cpusBusy ~= 1 then
+    fail(("cpus=%s busy=%s"):format(tostring(m.data.cpus),
+      tostring(m.data.cpusBusy)))
+  end
+end)
+
+-- -------------------------------------------------------------- historian
+
+T("historian: persists telemetry rings to disk", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  for t = 1, 5 do
+    env:rednetAt(t, 7, fluxEnvelope(), "telemetry")
+  end
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 12 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  local log = env:file("telemetry/flux.log")
+  if not log then fail("telemetry/flux.log not written") end
+  expectContains(log, "trueE", "flux.log")
+end)
+
+T("historian: fires drop alert to chat box and the mesh", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  env:rednetAt(1.0, 7, fluxEnvelope(10000000000), "telemetry")
+  env:rednetAt(3.0, 7, fluxEnvelope(5500000000), "telemetry") -- -45%
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 6 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  if #env.chatLog == 0 then fail("no chat message sent") end
+  expectContains(env.chatLog[1].msg, "dropped 45%", "chat message")
+  local alertSent = false
+  for _, s in ipairs(env.rednetSent) do
+    if type(s.message) == "table" and s.message.source == "alerts" then
+      alertSent = true
+    end
+  end
+  if not alertSent then fail("alert envelope not broadcast to the mesh") end
+end)
+
+T("historian: drop alert still broadcast without a chat box", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:rednetAt(1.0, 7, fluxEnvelope(10000000000), "telemetry")
+  env:rednetAt(3.0, 7, fluxEnvelope(5500000000), "telemetry")
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 6 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  local alertSent = false
+  for _, s in ipairs(env.rednetSent) do
+    if type(s.message) == "table" and s.message.source == "alerts" then
+      alertSent = true
+    end
+  end
+  if not alertSent then fail("alert envelope not broadcast") end
+end)
+
+T("historian: flags a source that goes silent", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  env:rednetAt(1.0, 7, fluxEnvelope(), "telemetry")
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 75 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  local found = false
+  for _, c in ipairs(env.chatLog) do
+    if c.msg:find("silent", 1, true) then found = true end
+  end
+  if not found then fail("no silence alert in chat log") end
 end)
 
 -- ------------------------------------------------------------------- eta

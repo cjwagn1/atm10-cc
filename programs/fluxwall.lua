@@ -1,30 +1,31 @@
 --[[
-fluxwall.lua - wall display client for fluxdash (ATM10 / CC:Tweaked)
+fluxwall.lua (v2) - multi-source telemetry wall for ATM10 (CC:Tweaked)
 
-Runs on a computer placed behind/beside your monitor wall, far away from
-the ME system. Listens for fluxdash broadcasts over rednet (wireless or
-ender modem) and renders a big, auto-scaled energy display on every
-attached monitor.
+Subscribes to the base telemetry mesh: every sensor computer broadcasts
+{ v, source, tick, data } envelopes on the rednet protocol "telemetry"
+(fluxdash publishes source "flux", mesensor publishes source "me", the
+historian publishes source "alerts"). The wall keeps one page per source
+and rotates between them; each page gets a purpose-built layout when one
+exists ("flux", "me") and a generic key/value dump otherwise, so brand-new
+sensors show up with zero wall changes.
 
-Setup:
-  1. Build the monitor wall (advanced monitors); place this computer so it
-     touches the array (hide it behind the wall), or wire it with modems.
-  2. Attach a wireless or ender modem to this computer AND to the fluxdash
-     computer. Ender modems work at any distance/dimension.
-  3. Run fluxwall (the installer sets it as startup, so it survives
-     restarts/chunk reloads).
+Extras:
+  - in-memory history per source -> sparkline row on tall monitors
+  - red alert banner whenever the historian announces something
+  - per-source "NO SIGNAL (Ns)" after 10s of silence
+  - auto-scaled text: biggest size that fits the layout on each monitor
+  - legacy fluxdash broadcasts (pre-mesh) still render fine
 
-Display states:
-  - live readings with a spinner that ticks on every received update
-  - "NO SIGNAL (Ns)" if nothing has been heard for 10s (fluxdash off,
-    chunk unloaded, or out of modem range)
+Keys: q quits, n flips to the next page early.
 ]]
 
-local REFRESH     = 1      -- seconds between repaints / staleness checks
-local STALE_AFTER = 10     -- seconds without a broadcast = NO SIGNAL
-local PROTOCOL    = "fluxdash"
-local MIN_W, MIN_H = 24, 7 -- smallest grid the layout needs; the
-                           -- auto-scaler picks the biggest text that fits
+local REFRESH      = 1     -- seconds between repaints
+local STALE_AFTER  = 10    -- per-source silence -> NO SIGNAL
+local PAGE_SECONDS = 8     -- auto-rotate interval between sources
+local ALERT_FOR    = 60    -- how long an alert banner stays up
+local RING_MAX     = 60    -- history points kept per source (sparkline)
+local PROTOCOL     = "telemetry"
+local MIN_W, MIN_H = 24, 7
 
 local function fmt(n)
   if type(n) ~= "number" then return "?" end
@@ -58,8 +59,6 @@ local function fmtSpan(sec)
     math.floor(sec / 86400), math.floor(sec % 86400 / 3600))
 end
 
--- "full in 2h 14m" / "empty in 30m"; nil when idle, already full/empty,
--- or capacity unknown. rate is FE/t (20 ticks per second).
 local function etaText(e, cap, rate)
   if type(e) ~= "number" or type(rate) ~= "number" then return nil end
   if rate >= 1 then
@@ -71,6 +70,28 @@ local function etaText(e, cap, rate)
   end
   return nil
 end
+
+local SPARK = { ".", ":", "-", "=", "+", "*", "#" }
+local function sparkline(ring, width)
+  if #ring < 2 then return nil end
+  local n = math.min(width, #ring)
+  local pts = {}
+  for i = #ring - n + 1, #ring do pts[#pts + 1] = ring[i] end
+  local lo, hi = math.huge, -math.huge
+  for _, v in ipairs(pts) do
+    lo = math.min(lo, v)
+    hi = math.max(hi, v)
+  end
+  if hi <= lo then return ("-"):rep(#pts) end
+  local out = {}
+  for _, v in ipairs(pts) do
+    local idx = 1 + math.floor((v - lo) / (hi - lo) * (#SPARK - 1) + 0.5)
+    out[#out + 1] = SPARK[idx]
+  end
+  return table.concat(out)
+end
+
+-- ----------------------------------------------------------- peripherals
 
 local function openModems()
   local opened = false
@@ -97,7 +118,155 @@ local function refreshMonitors()
   end
 end
 
-local state, lastSeen, msgCount
+-- --------------------------------------------------------- source registry
+
+local sources = {}  -- name -> { data, lastSeen, msgCount, ring }
+local order = {}    -- page order (sorted source names)
+local page = 1
+local pageStart = 0
+local alertMsg, alertAt
+local totalMsgs = 0
+
+local function rebuildOrder()
+  order = {}
+  for name in pairs(sources) do order[#order + 1] = name end
+  table.sort(order)
+  if page > #order then page = 1 end
+end
+
+-- ------------------------------------------------------------- renderers
+
+-- Each renderer: title shown on row 1, metric() feeds the sparkline ring,
+-- draw() paints rows 3..h-1. Unknown sources fall back to the generic one.
+
+local function drawFlux(t, w, h, d, ring, c, lineAt)
+  local e = d.trueE or d.e
+  local cap = d.trueE and d.trueCap or d.cap
+  c(colors.lime)
+  lineAt(3, fmt(e) .. " FE")
+  c(colors.white)
+  local pct = (e and cap and cap > 0) and (e / cap * 100) or nil
+  lineAt(4, "of " .. fmt(cap) .. " FE"
+    .. (pct and ("  (%.1f%%)"):format(pct) or ""))
+  if pct then
+    local bw = w - 2
+    local fill = math.floor(math.max(0, math.min(1, e / cap)) * bw + 0.5)
+    t.setCursorPos(2, 5)
+    c(colors.lime)
+    t.write(("#"):rep(fill))
+    c(colors.gray)
+    t.write(("-"):rep(bw - fill))
+    c(colors.white)
+  end
+  if d.rate then
+    c(d.rate >= 0 and colors.lime or colors.red)
+    lineAt(6, ("%s%s FE/t"):format(d.rate >= 0 and "+" or "", fmt(d.rate)))
+    c(colors.white)
+  end
+  local eta = etaText(e, cap, d.rate)
+  if eta then
+    c(colors.white)
+    lineAt(7, eta)
+  end
+  if h >= 9 and d.ae and d.aeMax then
+    c(colors.lightBlue)
+    lineAt(8, ("AE %s/%s%s"):format(fmt(d.ae), fmt(d.aeMax),
+      d.aeUse and ("  -" .. fmt(d.aeUse) .. "/t") or ""))
+    c(colors.white)
+  end
+  if h >= 11 then
+    local line = sparkline(ring, w - 2)
+    if line then
+      t.setCursorPos(2, 10)
+      c(colors.green)
+      t.write(line)
+      c(colors.white)
+    end
+  end
+end
+
+local function drawMe(t, w, h, d, ring, c, lineAt)
+  local used, total = d.usedBytes, d.totalBytes
+  c(colors.lime)
+  lineAt(3, fmt(used) .. " B used")
+  c(colors.white)
+  local pct = (used and total and total > 0) and (used / total * 100) or nil
+  lineAt(4, "of " .. fmt(total) .. " B"
+    .. (pct and ("  (%.1f%%)"):format(pct) or ""))
+  if pct then
+    local bw = w - 2
+    local fill = math.floor(math.max(0, math.min(1, used / total)) * bw + 0.5)
+    t.setCursorPos(2, 5)
+    c(colors.lime)
+    t.write(("#"):rep(fill))
+    c(colors.gray)
+    t.write(("-"):rep(bw - fill))
+    c(colors.white)
+  end
+  if d.cpus then
+    c(colors.lightBlue)
+    lineAt(6, ("Craft CPUs: %d/%d busy"):format(d.cpusBusy or 0, d.cpus))
+    c(colors.white)
+  end
+  if d.aeUse then
+    lineAt(7, "AE use: " .. fmt(d.aeUse) .. "/t")
+  end
+  if h >= 11 then
+    local line = sparkline(ring, w - 2)
+    if line then
+      t.setCursorPos(2, 10)
+      c(colors.green)
+      t.write(line)
+      c(colors.white)
+    end
+  end
+end
+
+local function drawGeneric(t, w, h, d, ring, c, lineAt)
+  local keys = {}
+  for k, v in pairs(d) do
+    if type(v) == "number" or type(v) == "string" then
+      keys[#keys + 1] = k
+    end
+  end
+  table.sort(keys)
+  local y = 3
+  for _, k in ipairs(keys) do
+    if y > h - 1 then break end
+    local v = d[k]
+    lineAt(y, ("%s: %s"):format(k,
+      type(v) == "number" and fmt(v) or tostring(v)))
+    y = y + 1
+  end
+end
+
+local RENDERERS = {
+  flux = {
+    title = "ME FLUX ENERGY",
+    metric = function(d) return d.trueE or d.e end,
+    draw = drawFlux,
+  },
+  me = {
+    title = "ME STORAGE",
+    metric = function(d) return d.usedBytes end,
+    draw = drawMe,
+  },
+}
+
+local function rendererFor(name)
+  return RENDERERS[name] or {
+    title = name:upper(),
+    metric = function(d)
+      for _, k in ipairs({ "value", "e", "energy", "count" }) do
+        if type(d[k]) == "number" then return d[k] end
+      end
+    end,
+    draw = drawGeneric,
+  }
+end
+
+-- ---------------------------------------------------------------- render
+
 local SPIN = { "|", "/", "-", "\\" }
 
 local function renderTarget(t, isTerm)
@@ -116,67 +285,51 @@ local function renderTarget(t, isTerm)
   t.setBackgroundColor(colors.black)
   t.clear()
 
+  local name = order[page]
+  local src = name and sources[name]
+  local r = name and rendererFor(name)
+
   c(colors.yellow)
-  lineAt(1, "ME FLUX ENERGY")
-  if msgCount and msgCount > 0 then
+  lineAt(1, r and r.title or "TELEMETRY")
+  if #order > 1 then
+    c(colors.gray)
+    local tag = ("%d/%d"):format(page, #order)
+    t.setCursorPos(w - #tag - 1, 1)
+    t.write(tag)
+  end
+  if totalMsgs > 0 then
     c(colors.gray)
     t.setCursorPos(w, 1)
-    t.write(SPIN[msgCount % 4 + 1])
+    t.write(SPIN[totalMsgs % 4 + 1])
   end
 
-  local age = lastSeen and (os.clock() - lastSeen) or nil
+  if alertAt and (os.clock() - alertAt) <= ALERT_FOR and alertMsg then
+    c(colors.red)
+    lineAt(2, "! " .. alertMsg)
+    c(colors.white)
+  end
 
-  if not state then
+  if not src then
     c(colors.red)
     lineAt(3, "NO SIGNAL")
     c(colors.gray)
-    lineAt(4, "waiting for fluxdash...")
-  elseif age and age > STALE_AFTER then
-    c(colors.red)
-    lineAt(3, ("NO SIGNAL (%ds)"):format(age))
-    c(colors.gray)
-    lineAt(4, "last: " .. fmt(state.trueE or state.e) .. " FE")
+    lineAt(4, "waiting for telemetry...")
   else
-    local e = state.trueE or state.e
-    local cap = state.trueE and state.trueCap or state.cap
-    c(colors.lime)
-    lineAt(3, fmt(e) .. " FE")
-    c(colors.white)
-    local pct = (e and cap and cap > 0) and (e / cap * 100) or nil
-    lineAt(4, "of " .. fmt(cap) .. " FE"
-      .. (pct and ("  (%.1f%%)"):format(pct) or ""))
-    if pct then
-      local bw = w - 2
-      local fill = math.floor(math.max(0, math.min(1, e / cap)) * bw + 0.5)
-      t.setCursorPos(2, 5)
-      c(colors.lime)
-      t.write(("#"):rep(fill))
+    local age = os.clock() - src.lastSeen
+    if age > STALE_AFTER then
+      c(colors.red)
+      lineAt(3, ("NO SIGNAL (%ds)"):format(age))
       c(colors.gray)
-      t.write(("-"):rep(bw - fill))
-      c(colors.white)
-    end
-    if state.rate then
-      c(state.rate >= 0 and colors.lime or colors.red)
-      lineAt(6, ("%s%s FE/t"):format(
-        state.rate >= 0 and "+" or "", fmt(state.rate)))
-      c(colors.white)
-    end
-    local eta = etaText(e, cap, state.rate)
-    if eta then
-      c(colors.white)
-      lineAt(7, eta)
-    end
-    if h >= 9 and state.ae and state.aeMax then
-      c(colors.lightBlue)
-      lineAt(8, ("AE %s/%s%s"):format(fmt(state.ae), fmt(state.aeMax),
-        state.aeUse and ("  -" .. fmt(state.aeUse) .. "/t") or ""))
-      c(colors.white)
+      local last = r.metric(src.data)
+      if last then lineAt(4, "last: " .. fmt(last)) end
+    else
+      r.draw(t, w, h, src.data, src.ring, c, lineAt)
     end
   end
 
   if isTerm then
     c(colors.gray)
-    lineAt(h, "[q] quit")
+    lineAt(h, "[q] quit  [n] next page")
     c(colors.white)
   end
 end
@@ -190,17 +343,42 @@ local function render()
   end
 end
 
+local function ingest(envelope)
+  local name = envelope.source
+  if type(name) ~= "string" or type(envelope.data) ~= "table" then return end
+  totalMsgs = totalMsgs + 1
+  if name == "alerts" then
+    alertMsg = tostring(envelope.data.msg or "alert")
+    alertAt = os.clock()
+    return
+  end
+  local src = sources[name]
+  if not src then
+    src = { ring = {}, msgCount = 0 }
+    sources[name] = src
+    rebuildOrder()
+  end
+  src.data = envelope.data
+  src.lastSeen = os.clock()
+  src.msgCount = src.msgCount + 1
+  local v = rendererFor(name).metric(envelope.data)
+  if type(v) == "number" then
+    src.ring[#src.ring + 1] = v
+    if #src.ring > RING_MAX then table.remove(src.ring, 1) end
+  end
+end
+
 -- ------------------------------------------------------------------ main
 
 if not openModems() then
   print("No modem found.")
   print("Attach a wireless or ender modem so this")
-  print("display can hear the fluxdash computer.")
+  print("display can hear the sensor computers.")
   return
 end
 
 refreshMonitors()
-msgCount = 0
+pageStart = os.clock()
 render()
 
 local timer = os.startTimer(REFRESH)
@@ -208,13 +386,24 @@ while true do
   local ev = table.pack(os.pullEventRaw())
   if ev[1] == "terminate" or (ev[1] == "char" and ev[2] == "q") then
     break
+  elseif ev[1] == "char" and ev[2] == "n" and #order > 1 then
+    page = page % #order + 1
+    pageStart = os.clock()
+    render()
   elseif ev[1] == "rednet_message" and ev[4] == PROTOCOL
     and type(ev[3]) == "table" then
-    state = ev[3]
-    lastSeen = os.clock()
-    msgCount = msgCount + 1
+    ingest(ev[3])
+    render()
+  elseif ev[1] == "rednet_message" and ev[4] == "fluxdash"
+    and type(ev[3]) == "table" then
+    -- legacy pre-mesh fluxdash broadcast: treat as a flux envelope
+    ingest({ v = 1, source = "flux", data = ev[3] })
     render()
   elseif ev[1] == "timer" and ev[2] == timer then
+    if #order > 1 and (os.clock() - pageStart) >= PAGE_SECONDS then
+      page = page % #order + 1
+      pageStart = os.clock()
+    end
     render()
     timer = os.startTimer(REFRESH)
   elseif ev[1] == "peripheral" or ev[1] == "peripheral_detach" then
