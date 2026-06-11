@@ -1,31 +1,31 @@
 --[[
-fluxwall.lua (v2) - multi-source telemetry wall for ATM10 (CC:Tweaked)
+fluxwall.lua (v3) - unified telemetry wall for ATM10 (CC:Tweaked)
 
 Subscribes to the base telemetry mesh: every sensor computer broadcasts
 { v, source, tick, data } envelopes on the rednet protocol "telemetry"
 (fluxdash publishes source "flux", mesensor publishes source "me", the
-historian publishes source "alerts"). The wall keeps one page per source
-and rotates between them; each page gets a purpose-built layout when one
-exists ("flux", "me") and a generic key/value dump otherwise, so brand-new
-sensors show up with zero wall changes.
+historian publishes source "alerts").
 
-Extras:
-  - in-memory history per source -> sparkline row on tall monitors
-  - red alert banner whenever the historian announces something
-  - per-source "NO SIGNAL (Ns)" after 10s of silence
-  - auto-scaled text: biggest size that fits the layout on each monitor
-  - legacy fluxdash broadcasts (pre-mesh) still render fine
+Unlike the paged v2, this shows EVERY source at once, stacked as compact
+cards on a single screen - no rotation, nothing to wait for. Each source
+gets an equal vertical band; cards render as much detail as their band
+allows (headline -> bar -> rate/ETA -> sparkline), so the same program
+looks right on a tiny monitor and a huge wall. New sensors appear as new
+cards automatically via the generic renderer.
 
-Keys: q quits, n flips to the next page early.
+Extras: red alert banner from the historian, per-source "NO SIGNAL (Ns)"
+inline when a sensor goes quiet, auto-scaled text. Press q to quit.
 ]]
 
-local REFRESH      = 1     -- seconds between repaints
-local STALE_AFTER  = 10    -- per-source silence -> NO SIGNAL
-local PAGE_SECONDS = 8     -- auto-rotate interval between sources
-local ALERT_FOR    = 60    -- how long an alert banner stays up
-local RING_MAX     = 60    -- history points kept per source (sparkline)
-local PROTOCOL     = "telemetry"
-local MIN_W, MIN_H = 24, 7
+local REFRESH     = 1     -- seconds between repaints
+local STALE_AFTER = 10    -- per-source silence -> NO SIGNAL
+local ALERT_FOR   = 60    -- how long an alert banner stays up
+local RING_MAX    = 120   -- history points kept per source (sparkline)
+local PROTOCOL    = "telemetry"
+local MIN_W, MIN_H = 22, 6
+
+local colors = colors
+local function col(name) return colors[name] end
 
 local function fmt(n)
   if type(n) ~= "number" then return "?" end
@@ -79,16 +79,36 @@ local function sparkline(ring, width)
   for i = #ring - n + 1, #ring do pts[#pts + 1] = ring[i] end
   local lo, hi = math.huge, -math.huge
   for _, v in ipairs(pts) do
-    lo = math.min(lo, v)
-    hi = math.max(hi, v)
+    lo, hi = math.min(lo, v), math.max(hi, v)
   end
   if hi <= lo then return ("-"):rep(#pts) end
   local out = {}
   for _, v in ipairs(pts) do
-    local idx = 1 + math.floor((v - lo) / (hi - lo) * (#SPARK - 1) + 0.5)
-    out[#out + 1] = SPARK[idx]
+    out[#out + 1] = SPARK[1 + math.floor((v - lo) / (hi - lo) * (#SPARK - 1) + 0.5)]
   end
   return table.concat(out)
+end
+
+-- a "line" is a list of {text, color} segments; row() drops nil segments
+local function seg(text, color) return { text = text, color = color } end
+local function row(...)
+  local out, n = {}, select("#", ...)
+  for i = 1, n do
+    local s = select(i, ...)
+    if s then out[#out + 1] = s end
+  end
+  return out
+end
+
+local function barLine(frac, w)
+  frac = math.max(0, math.min(1, frac))
+  local pct = (" %d%%"):format(math.floor(frac * 100 + 0.5))
+  local bw = w - #pct - 1
+  if bw < 4 then bw, pct = w - 1, "" end
+  local fill = math.floor(frac * bw + 0.5)
+  return row(seg(" ", col("white")), seg(("#"):rep(fill), col("lime")),
+    seg(("-"):rep(bw - fill), col("gray")),
+    pct ~= "" and seg(pct, col("white")) or nil)
 end
 
 -- ----------------------------------------------------------- peripherals
@@ -118,12 +138,95 @@ local function refreshMonitors()
   end
 end
 
--- --------------------------------------------------------- source registry
+-- ---------------------------------------------------------- card renderers
 
-local sources = {}  -- name -> { data, lastSeen, msgCount, ring }
-local order = {}    -- page order (sorted source names)
-local page = 1
-local pageStart = 0
+-- Each returns { label=, metric=, lines=function(d, ring, w) -> {line...} }
+-- in descending priority; the band shows as many lines as fit.
+
+local function fluxLines(d, ring, w)
+  local e = d.trueE or d.e
+  local cap = d.trueE and d.trueCap or d.cap
+  local pct = (e and cap and cap > 0) and (e / cap * 100) or nil
+  local L = {}
+  L[#L + 1] = row(seg("FLUX ", col("yellow")),
+    seg(fmt(e) .. (cap and "/" .. fmt(cap) or "") .. " FE", col("lime")),
+    pct and seg((" %.0f%%"):format(pct), col("white")) or nil)
+  if pct then L[#L + 1] = barLine(e / cap, w) end
+  if d.rate then
+    L[#L + 1] = row(seg((d.rate >= 0 and "+" or "") .. fmt(d.rate) .. " FE/t",
+      d.rate >= 0 and col("lime") or col("red")))
+  end
+  local eta = etaText(e, cap, d.rate)
+  if eta then L[#L + 1] = row(seg(eta, col("white"))) end
+  if d.ae and d.aeMax then
+    L[#L + 1] = row(seg("AE " .. fmt(d.ae) .. "/" .. fmt(d.aeMax)
+      .. (d.aeUse and ("  -" .. fmt(d.aeUse) .. "/t") or ""), col("lightBlue")))
+  end
+  local sl = sparkline(ring, w - 1)
+  if sl then L[#L + 1] = row(seg(" " .. sl, col("green"))) end
+  return L
+end
+
+local function meLines(d, ring, w)
+  local used, total = d.usedBytes, d.totalBytes
+  local pct = (used and total and total > 0) and (used / total * 100) or nil
+  local L = {}
+  L[#L + 1] = row(seg("ME   ", col("yellow")),
+    seg(fmt(used) .. "/" .. fmt(total) .. " B", col("lime")),
+    pct and seg((" %.0f%%"):format(pct), col("white")) or nil)
+  if pct then L[#L + 1] = barLine(used / total, w) end
+  local bits = {}
+  if d.cpus then bits[#bits + 1] = ("CPU %d/%d"):format(d.cpusBusy or 0, d.cpus) end
+  if d.aeUse then bits[#bits + 1] = "AE " .. fmt(d.aeUse) .. "/t" end
+  if #bits > 0 then
+    L[#L + 1] = row(seg(table.concat(bits, "  "), col("lightBlue")))
+  end
+  local sl = sparkline(ring, w - 1)
+  if sl then L[#L + 1] = row(seg(" " .. sl, col("green"))) end
+  return L
+end
+
+local function genericLines(label)
+  return function(d, ring, w)
+    local L = { row(seg(label .. " ", col("yellow"))) }
+    local keys = {}
+    for k, v in pairs(d) do
+      if type(v) == "number" or type(v) == "string" then keys[#keys + 1] = k end
+    end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+      local v = d[k]
+      L[#L + 1] = row(seg("  " .. k .. ": "
+        .. (type(v) == "number" and fmt(v) or tostring(v)), col("white")))
+    end
+    return L
+  end
+end
+
+local RENDERERS = {
+  flux = { label = "FLUX", metric = function(d) return d.trueE or d.e end,
+    lines = fluxLines },
+  me = { label = "ME", metric = function(d) return d.usedBytes end,
+    lines = meLines },
+}
+
+local function rendererFor(name)
+  if RENDERERS[name] then return RENDERERS[name] end
+  return {
+    label = name:upper(),
+    metric = function(d)
+      for _, k in ipairs({ "value", "e", "energy", "count" }) do
+        if type(d[k]) == "number" then return d[k] end
+      end
+    end,
+    lines = genericLines(name:upper()),
+  }
+end
+
+-- --------------------------------------------------------------- state
+
+local sources = {}  -- name -> { data, lastSeen, ring }
+local order = {}
 local alertMsg, alertAt
 local totalMsgs = 0
 
@@ -131,138 +234,6 @@ local function rebuildOrder()
   order = {}
   for name in pairs(sources) do order[#order + 1] = name end
   table.sort(order)
-  if page > #order then page = 1 end
-end
-
--- ------------------------------------------------------------- renderers
-
--- Each renderer: title shown on row 1, metric() feeds the sparkline ring,
--- draw() paints rows 3..h-1. Unknown sources fall back to the generic one.
-
-local function drawFlux(t, w, h, d, ring, c, lineAt)
-  local e = d.trueE or d.e
-  local cap = d.trueE and d.trueCap or d.cap
-  c(colors.lime)
-  lineAt(3, fmt(e) .. " FE")
-  c(colors.white)
-  local pct = (e and cap and cap > 0) and (e / cap * 100) or nil
-  lineAt(4, "of " .. fmt(cap) .. " FE"
-    .. (pct and ("  (%.1f%%)"):format(pct) or ""))
-  if pct then
-    local bw = w - 2
-    local fill = math.floor(math.max(0, math.min(1, e / cap)) * bw + 0.5)
-    t.setCursorPos(2, 5)
-    c(colors.lime)
-    t.write(("#"):rep(fill))
-    c(colors.gray)
-    t.write(("-"):rep(bw - fill))
-    c(colors.white)
-  end
-  if d.rate then
-    c(d.rate >= 0 and colors.lime or colors.red)
-    lineAt(6, ("%s%s FE/t"):format(d.rate >= 0 and "+" or "", fmt(d.rate)))
-    c(colors.white)
-  end
-  local eta = etaText(e, cap, d.rate)
-  if eta then
-    c(colors.white)
-    lineAt(7, eta)
-  end
-  if h >= 9 and d.ae and d.aeMax then
-    c(colors.lightBlue)
-    lineAt(8, ("AE %s/%s%s"):format(fmt(d.ae), fmt(d.aeMax),
-      d.aeUse and ("  -" .. fmt(d.aeUse) .. "/t") or ""))
-    c(colors.white)
-  end
-  if h >= 11 then
-    local line = sparkline(ring, w - 2)
-    if line then
-      t.setCursorPos(2, 10)
-      c(colors.green)
-      t.write(line)
-      c(colors.white)
-    end
-  end
-end
-
-local function drawMe(t, w, h, d, ring, c, lineAt)
-  local used, total = d.usedBytes, d.totalBytes
-  c(colors.lime)
-  lineAt(3, fmt(used) .. " B used")
-  c(colors.white)
-  local pct = (used and total and total > 0) and (used / total * 100) or nil
-  lineAt(4, "of " .. fmt(total) .. " B"
-    .. (pct and ("  (%.1f%%)"):format(pct) or ""))
-  if pct then
-    local bw = w - 2
-    local fill = math.floor(math.max(0, math.min(1, used / total)) * bw + 0.5)
-    t.setCursorPos(2, 5)
-    c(colors.lime)
-    t.write(("#"):rep(fill))
-    c(colors.gray)
-    t.write(("-"):rep(bw - fill))
-    c(colors.white)
-  end
-  if d.cpus then
-    c(colors.lightBlue)
-    lineAt(6, ("Craft CPUs: %d/%d busy"):format(d.cpusBusy or 0, d.cpus))
-    c(colors.white)
-  end
-  if d.aeUse then
-    lineAt(7, "AE use: " .. fmt(d.aeUse) .. "/t")
-  end
-  if h >= 11 then
-    local line = sparkline(ring, w - 2)
-    if line then
-      t.setCursorPos(2, 10)
-      c(colors.green)
-      t.write(line)
-      c(colors.white)
-    end
-  end
-end
-
-local function drawGeneric(t, w, h, d, ring, c, lineAt)
-  local keys = {}
-  for k, v in pairs(d) do
-    if type(v) == "number" or type(v) == "string" then
-      keys[#keys + 1] = k
-    end
-  end
-  table.sort(keys)
-  local y = 3
-  for _, k in ipairs(keys) do
-    if y > h - 1 then break end
-    local v = d[k]
-    lineAt(y, ("%s: %s"):format(k,
-      type(v) == "number" and fmt(v) or tostring(v)))
-    y = y + 1
-  end
-end
-
-local RENDERERS = {
-  flux = {
-    title = "ME FLUX ENERGY",
-    metric = function(d) return d.trueE or d.e end,
-    draw = drawFlux,
-  },
-  me = {
-    title = "ME STORAGE",
-    metric = function(d) return d.usedBytes end,
-    draw = drawMe,
-  },
-}
-
-local function rendererFor(name)
-  return RENDERERS[name] or {
-    title = name:upper(),
-    metric = function(d)
-      for _, k in ipairs({ "value", "e", "energy", "count" }) do
-        if type(d[k]) == "number" then return d[k] end
-      end
-    end,
-    draw = drawGeneric,
-  }
 end
 
 -- ---------------------------------------------------------------- render
@@ -272,66 +243,68 @@ local SPIN = { "|", "/", "-", "\\" }
 local function renderTarget(t, isTerm)
   local w, h = t.getSize()
   local can = t.isColor and t.isColor()
-  local function c(col)
-    if can then t.setTextColor(col) end
-  end
-  local function lineAt(y, txt)
-    if y >= 1 and y <= h and txt and #txt > 0 then
-      t.setCursorPos(1, y)
-      t.write(txt:sub(1, w))
+  local function setc(c) if can and c then t.setTextColor(c) end end
+  local function drawLine(y, segs)
+    if y < 1 or y > h then return end
+    t.setCursorPos(1, y)
+    local x = 1
+    for _, s in ipairs(segs) do
+      if x > w then break end
+      local txt = s.text
+      if x + #txt - 1 > w then txt = txt:sub(1, w - x + 1) end
+      setc(s.color)
+      t.write(txt)
+      x = x + #txt
     end
   end
 
-  t.setBackgroundColor(colors.black)
+  t.setBackgroundColor(col("black"))
   t.clear()
 
-  local name = order[page]
-  local src = name and sources[name]
-  local r = name and rendererFor(name)
-
-  c(colors.yellow)
-  lineAt(1, r and r.title or "TELEMETRY")
-  if #order > 1 then
-    c(colors.gray)
-    local tag = ("%d/%d"):format(page, #order)
-    t.setCursorPos(w - #tag - 1, 1)
-    t.write(tag)
-  end
+  local y = 1
+  setc(col("yellow"))
+  drawLine(1, row(seg("BASE TELEMETRY", col("yellow"))))
   if totalMsgs > 0 then
-    c(colors.gray)
+    setc(col("gray"))
     t.setCursorPos(w, 1)
     t.write(SPIN[totalMsgs % 4 + 1])
   end
+  y = 2
 
   if alertAt and (os.clock() - alertAt) <= ALERT_FOR and alertMsg then
-    c(colors.red)
-    lineAt(2, "! " .. alertMsg)
-    c(colors.white)
+    drawLine(y, row(seg("! " .. alertMsg, col("red"))))
+    y = y + 1
   end
 
-  if not src then
-    c(colors.red)
-    lineAt(3, "NO SIGNAL")
-    c(colors.gray)
-    lineAt(4, "waiting for telemetry...")
+  local bottom = isTerm and (h - 1) or h
+  if #order == 0 then
+    drawLine(y, row(seg("NO SIGNAL", col("red"))))
+    drawLine(y + 1, row(seg("waiting for telemetry...", col("gray"))))
   else
-    local age = os.clock() - src.lastSeen
-    if age > STALE_AFTER then
-      c(colors.red)
-      lineAt(3, ("NO SIGNAL (%ds)"):format(age))
-      c(colors.gray)
-      local last = r.metric(src.data)
-      if last then lineAt(4, "last: " .. fmt(last)) end
-    else
-      r.draw(t, w, h, src.data, src.ring, c, lineAt)
+    local avail = bottom - y + 1
+    local band = math.max(1, math.floor(avail / #order))
+    for idx, name in ipairs(order) do
+      local src = sources[name]
+      local r = rendererFor(name)
+      local top = y + (idx - 1) * band
+      local age = os.clock() - src.lastSeen
+      if age > STALE_AFTER then
+        drawLine(top, row(seg(r.label .. " ", col("yellow")),
+          seg(("NO SIGNAL (%ds)"):format(math.floor(age)), col("red"))))
+      else
+        local lines = r.lines(src.data, src.ring, w)
+        for i = 1, math.min(#lines, band) do
+          drawLine(top + i - 1, lines[i])
+        end
+      end
     end
   end
 
   if isTerm then
-    c(colors.gray)
-    lineAt(h, "[q] quit  [n] next page")
-    c(colors.white)
+    setc(col("gray"))
+    drawLine(h, row(seg("[q] quit", col("gray"))))
   end
+  setc(col("white"))
 end
 
 local function render()
@@ -354,13 +327,12 @@ local function ingest(envelope)
   end
   local src = sources[name]
   if not src then
-    src = { ring = {}, msgCount = 0 }
+    src = { ring = {} }
     sources[name] = src
     rebuildOrder()
   end
   src.data = envelope.data
   src.lastSeen = os.clock()
-  src.msgCount = src.msgCount + 1
   local v = rendererFor(name).metric(envelope.data)
   if type(v) == "number" then
     src.ring[#src.ring + 1] = v
@@ -378,7 +350,6 @@ if not openModems() then
 end
 
 refreshMonitors()
-pageStart = os.clock()
 render()
 
 local timer = os.startTimer(REFRESH)
@@ -386,10 +357,6 @@ while true do
   local ev = table.pack(os.pullEventRaw())
   if ev[1] == "terminate" or (ev[1] == "char" and ev[2] == "q") then
     break
-  elseif ev[1] == "char" and ev[2] == "n" and #order > 1 then
-    page = page % #order + 1
-    pageStart = os.clock()
-    render()
   elseif ev[1] == "rednet_message" and ev[4] == PROTOCOL
     and type(ev[3]) == "table" then
     ingest(ev[3])
@@ -400,10 +367,6 @@ while true do
     ingest({ v = 1, source = "flux", data = ev[3] })
     render()
   elseif ev[1] == "timer" and ev[2] == timer then
-    if #order > 1 and (os.clock() - pageStart) >= PAGE_SECONDS then
-      page = page % #order + 1
-      pageStart = os.clock()
-    end
     render()
     timer = os.startTimer(REFRESH)
   elseif ev[1] == "peripheral" or ev[1] == "peripheral_detach" then
@@ -418,12 +381,12 @@ end
 
 for _, m in ipairs(mons) do
   pcall(function()
-    m.setBackgroundColor(colors.black)
+    m.setBackgroundColor(col("black"))
     m.clear()
     m.setCursorPos(1, 1)
   end)
 end
-term.setBackgroundColor(colors.black)
+term.setBackgroundColor(col("black"))
 term.clear()
 term.setCursorPos(1, 1)
 print("fluxwall stopped.")

@@ -399,15 +399,17 @@ T("wall: renders big auto-scaled layout from rednet data", function()
   local env = CC.new{ termW = 51, termH = 19 }
   env:addModem("top")
   env:addMonitor("monitor_2", { baseW = 36, baseH = 18 }) -- scale-aware
-  local msg = { v = 1, trueE = 2952790016, trueCap = 281474976710656,
-    cells = 1, rate = 489420, srcName = "block reader" }
-  env:rednetAt(1.0, 7, msg, "fluxdash")
-  env:rednetAt(2.0, 7, msg, "fluxdash")
+  -- legacy pre-mesh fluxdash packet still understood (envelope-wrapped)
+  local d = { trueE = 2952790016, trueCap = 281474976710656,
+    cells = 1, rate = 489420 }
+  env:rednetAt(1.0, 7, { v = 1, source = "flux", data = d }, "telemetry")
+  env:rednetAt(2.0, 7, { v = 1, source = "flux", data = d }, "telemetry")
   current = env
   env:run(WALL, {}, { maxTime = 3 })
   local m = env:monitorText("monitor_2")
-  expectContains(m, "2.95G FE", "monitor (headline)")
-  expectContains(m, "281.47T", "monitor (capacity)")
+  expectContains(m, "FLUX", "monitor (label)")
+  expectContains(m, "2.95G", "monitor (stored)")
+  expectContains(m, "281.47T", "monitor (capacity on headline)")
   expectContains(m, "+489.42k FE/t", "monitor (rate)")
   if env:monitorScale("monitor_2") ~= 1.5 then
     fail("expected auto-scale 1.5, got " .. tostring(env:monitorScale("monitor_2")))
@@ -415,11 +417,13 @@ T("wall: renders big auto-scaled layout from rednet data", function()
   expectContains(env:termText(), "2.95G", "terminal mirror")
 end)
 
-T("wall: shows NO SIGNAL when the feed goes stale", function()
+T("wall: shows NO SIGNAL when a source goes stale", function()
   local env = CC.new{ termW = 51, termH = 19 }
   env:addModem("top")
   env:addMonitor("monitor_2", { baseW = 36, baseH = 18 })
-  env:rednetAt(1.0, 7, { v = 1, trueE = 2952790016 }, "fluxdash")
+  -- legacy fluxdash envelope, then silence -> flux card goes stale
+  env:rednetAt(1.0, 7, { v = 1, source = "flux", data = { trueE = 2952790016 } },
+    "telemetry")
   current = env
   env:run(WALL, {}, { maxTime = 15 })
   expectContains(env:monitorText("monitor_2"), "NO SIGNAL", "monitor")
@@ -466,26 +470,41 @@ T("mesh: wall renders flux page from a telemetry envelope", function()
   env:rednetAt(2.0, 7, fluxEnvelope(), "telemetry")
   current = env
   env:run(WALL, {}, { maxTime = 3 })
-  expectContains(env:monitorText("monitor_2"), "2.95G FE", "monitor")
+  expectContains(env:monitorText("monitor_2"), "2.95G", "monitor")
   expectContains(env:monitorText("monitor_2"), "+489.42k FE/t", "monitor")
 end)
 
-T("mesh: wall pages between multiple sources", function()
+T("mesh: wall shows ALL sources on one screen, no rotation", function()
   local env = CC.new{ termW = 51, termH = 19 }
   env:addModem("top")
   env:addMonitor("monitor_2", { baseW = 36, baseH = 18 })
-  for t = 1, 13, 2 do
+  for t = 1, 12 do
     env:rednetAt(t, 7, fluxEnvelope(), "telemetry")
-    env:rednetAt(t + 1, 8, ME_ENVELOPE, "telemetry")
+    env:rednetAt(t, 8, ME_ENVELOPE, "telemetry")
   end
-  env:monitorSnapshotAt(4, "p1", "monitor_2")
-  env:monitorSnapshotAt(12, "p2", "monitor_2")
   current = env
-  env:run(WALL, {}, { maxTime = 14 })
-  if not env.snapshots.p1 then fail("no p1 snapshot") end
-  expectContains(env.snapshots.p1, "FE", "monitor page 1 (flux)")
-  if not env.snapshots.p2 then fail("no p2 snapshot") end
-  expectContains(env.snapshots.p2, "ME STORAGE", "monitor page 2 (me)")
+  env:run(WALL, {}, { maxTime = 13 })
+  local m = env:monitorText("monitor_2")
+  -- both sources visible in the SAME final frame
+  expectContains(m, "FLUX", "monitor (flux card)")
+  expectContains(m, "2.95G", "monitor (flux value)")
+  expectContains(m, "ME", "monitor (me card)")
+  expectContains(m, "612.00k", "monitor (me storage value)")
+end)
+
+T("mesh: both sources fit even on a small monitor", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 24, baseH = 10 }) -- scale 1 -> 24x10
+  for t = 1, 4 do
+    env:rednetAt(t, 7, fluxEnvelope(), "telemetry")
+    env:rednetAt(t, 8, ME_ENVELOPE, "telemetry")
+  end
+  current = env
+  env:run(WALL, {}, { maxTime = 5 })
+  local m = env:monitorText("monitor_2")
+  expectContains(m, "FLUX", "small monitor (flux headline)")
+  expectContains(m, "ME", "small monitor (me headline)")
 end)
 
 T("mesh: wall shows alert banner from the alerts source", function()
