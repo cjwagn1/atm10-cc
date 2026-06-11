@@ -1,120 +1,295 @@
-# atm10-cc — ComputerCraft dev workspace for ATM10
+# atm10-cc — a tested telemetry suite for All The Mods 10 (ComputerCraft)
 
-CC:Tweaked scripts for the All The Mods 10 (v7.0, MC 1.21.1) server, developed
-and **tested headlessly before anything gets installed in-game**. Scripts run
-inside a faithful emulator harness against mocked peripherals whose APIs are
-verified from the actual mod sources vendored in `vendor/`.
+In-game base telemetry for an **All The Mods 10 v7.0** server (Minecraft
+1.21.1, CC:Tweaked 1.117.1, server rented from Kinetic Hosting): sensor
+computers publish readings over a wireless pub/sub mesh, a monitor wall
+renders everything on one screen, and a historian records history, detects
+trouble ("flux dropped 45% in 5m"), and pings the player in Minecraft chat.
 
-## Layout
+Two things make this repo unusual:
+
+1. **Every program is tested before it ever touches the server** — in a
+   purpose-built headless CC:Tweaked emulator (`harness/`), against mock
+   peripherals whose APIs were verified by reading the actual mod sources
+   (vendored under `vendor/`). 47 tests, written TDD-style (red → green).
+2. **It reads the true network energy past the 32-bit API ceiling** — a
+   source-verified workaround documented below, validated in-game to the
+   exact FE.
+
+Everything described here is deployed and confirmed working in-game.
+
+---
+
+## The system at a glance
 
 ```
-programs/        scripts ready to install in-game (fluxdash.lua)
-reference/       upstream/original versions kept for comparison (untouched)
-harness/         headless CC:Tweaked emulator (cc_env.lua) + demo runner
-tests/           test suite; run before shipping anything to the server
-vendor/          shallow clones of mod sources (ground truth for APIs)
-toolchain/       Lua 5.2.4 built from source (matches CC's Cobalt semantics)
-docs/            research findings + in-game checklist
+ basement cave                              main base area
+┌─────────────────────────────┐            ┌──────────────────────────┐
+│ [dash computer]──fluxdash   │            │ [wall computer]──fluxwall│
+│   ├─ Flux Accessor (FE cap) │  rednet    │   └─ monitor wall        │
+│   └─ Block Reader → ME Drive│ "telemetry"│                          │
+│        (true 64-bit totals) │ ═══════════│ [historian computer]     │
+│ [me computer]──mesensor     │  (ender    │   ├─ history → disk      │
+│   └─ ME Bridge (storage,    │   modems)  │   ├─ alert rules         │
+│        craft CPUs, AE grid) │            │   ├─ Chat Box → MC chat  │
+└─────────────────────────────┘            │   └─ (opt) ws → Discord  │
+                                           └──────────────────────────┘
 ```
 
-## Dev loop
+What the wall shows (live render from the emulator, real numbers):
+
+```
+BASE TELEMETRY         |
+FLUX 10.13G/281.47T FE 0%
+ -------------------- 0%
+-36.66k FE/t
+empty in 3h 50m
+ ------------
+ME   612.00k/2.10M B 29%
+ ######------------- 29%
+CPU 1/4  AE 96/t
+ ------------
+```
+
+All sources at once — no page rotation. Each source gets an equal vertical
+band and renders as much detail as fits (headline → bar → rate/ETA →
+sparkline), so the same program looks right on one monitor or a 4×3 wall.
+Text auto-scales to the largest size that fits. A spinner ticks on every
+received packet; a red banner crosses the top when the historian raises an
+alert; a source that goes quiet shows `NO SIGNAL (Ns)` inline.
+
+## Programs
+
+| program     | role        | what it does |
+|-------------|-------------|--------------|
+| `fluxdash`  | `dash`      | Reads flux energy (true totals via Block Reader, clamped FE capability as fallback), renders a local dashboard on its terminal + adjacent monitors, publishes source `flux` |
+| `mesensor`  | `me`        | Reads an ME Bridge: item storage bytes, crafting CPU busy/total, AE grid draw; publishes source `me` |
+| `fluxwall`  | `wall`      | Display client: unified card view of every source heard on the mesh |
+| `historian` | `historian` | Records rolling history per source to disk, evaluates alert rules, announces via Chat Box (in-game chat) + broadcasts source `alerts`, optional websocket export |
+| `fluxprobe` | —           | Diagnostic: dumps whatever a Block Reader sees, sums every `fe_energy` value at any depth, saves `fluxdump.txt` |
+| `installer` / `update` | — | One-command bootstrap + self-update for every computer (below) |
+
+## The headline hack: true totals past 2,147,483,647 FE
+
+**Problem.** The Forge/NeoForge energy API is `int`-typed. CC:Tweaked's
+generic `energy_storage` peripheral (`getEnergy`/`getEnergyCapacity`)
+therefore saturates at 2,147,483,647 FE. AppFlux (the AE2 addon storing FE
+in ME "flux cells") clamps explicitly — `AFUtil.clampLong = (int)
+Math.min(value, Integer.MAX_VALUE)` — and a **single 4k flux cell holds
+4.29G FE**, so the clamp is the *normal* case, not an edge case. Verified
+dead ends (by reading the mod sources, not guessing):
+
+- AppFlux has **zero ComputerCraft integration** — the generic FE
+  capability is its only computer-facing API.
+- The Advanced Peripherals ME Bridge cannot see flux cells at all: its
+  `getCells()`/`getDrives()` only parse AE2's `BasicStorageCell` /
+  `IBasicCellItem`, and AppFlux's `IFluxCell` implements neither.
+
+**Solution.** AppFlux persists each cell's energy as the item component
+**`appflux:fe_energy` — a 64-bit long** — on the cell item, which lives
+inside the ME Drive's saved NBT. An Advanced Peripherals **Block Reader**
+(`block_reader`, enabled by default) faced at the drive returns that whole
+NBT via `getBlockData()`. Sum every `fe_energy` value: the true network
+total, no ceiling that matters (Lua doubles are exact to 2^53 ≈ 9 peta-FE).
+True **capacity** is derived from the cell item ids: cell bytes ×
+1,048,576 FE/byte (`fe_1k_cell` = 1.07G … `fe_256m_cell` = 281.47T).
+
+**Validated in-game:** the probe read **51,847,398,108 FE** exactly while
+the capability reported 2,147,483,647. The dump walker is shape-agnostic
+(it found the values on an `extendedae:ex_drive`, key path
+`inv.itemN.components."appflux:fe_energy"`, without knowing that layout in
+advance).
+
+**Operational rule:** flux cells only count if they sit in a drive that has
+a Block Reader facing it — one reader per drive, or keep all FE cells in
+one drive. True rate (FE/t) is computed from deltas of the true total over
+a 10s window using `os.clock()` (game-tick time, so it stays honest under
+TPS lag), and feeds "full in 2h 14m" / "empty in 30m" ETAs.
+
+## Telemetry mesh protocol
+
+Single rednet protocol **`"telemetry"`**. Every sensor broadcasts an
+envelope once per refresh (1–2s):
+
+```lua
+{
+  v = 1,              -- schema version
+  source = "flux",    -- unique sensor name; becomes a card on the wall
+  tick = os.clock(),  -- sender uptime (debug)
+  data = { ... },     -- source-specific payload
+}
+```
+
+Current sources:
+
+| source   | data fields |
+|----------|-------------|
+| `flux`   | `trueE`, `trueCap`, `cells` (via block reader); `e`, `cap` (clamped capability fallback); `rate` (FE/t, smoothed 10s); `srcName`; `ae`, `aeMax`, `aeUse`, `aeIn` (ME Bridge AE-unit grid stats, 1 AE = 2 FE) |
+| `me`     | `usedBytes`, `totalBytes`, `availBytes` (item storage cells); `cpus`, `cpusBusy` (crafting CPUs); `aeUse` (AE/t) |
+| `alerts` | `msg` (historian-computed event; the wall shows it as a banner) |
+
+**Adding a sensor = one small program**: read something, broadcast an
+envelope with a new `source` name every few seconds. It appears on the
+wall automatically (generic key/value card; numbers get human-formatted),
+the historian records it, and the silence rule watches it — all with zero
+changes to the wall or historian. Purpose-built wall cards and alert rules
+can come later. Receivers treat a source silent >10s as stale
+(`NO SIGNAL`); the historian alerts at >60s.
+
+## Historian + alerts
+
+A dedicated computer subscribes to everything and keeps a rolling ring
+(360 samples) per source, flushed to `telemetry/<source>.log` every 10s
+(`telemetry/alerts.log` is append-only). Alert rules are a table at the top
+of `historian.lua`:
+
+```lua
+local ALERTS = {
+  { source = "flux", key = "energy", dropPct = 40, window = 300 },
+  { source = "*", silentFor = 60 },
+}
+```
+
+Drop rules compare the newest sample to the oldest within the window
+("flux energy dropped 45% in 5m (10.00G -> 5.50G)"); silence rules fire
+once per outage; everything has a 5-minute cooldown. On fire, the
+historian (1) sends in-game chat via an adjacent Advanced Peripherals
+**Chat Box**, (2) broadcasts the alert as source `alerts` so every wall
+shows the red banner, (3) appends to the alert log, (4) optionally streams
+to the bridge.
+
+## Deployment
+
+Bootstrap any fresh computer with one command (roles: `dash`, `wall`,
+`me`, `historian` — the role list lives in `deploy/manifest.lua`, so new
+roles never require installer changes):
+
+```
+wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua <role>
+```
+
+The installer fetches the manifest, downloads every program, writes a
+`startup.lua` for the role (computers auto-start after server restarts and
+chunk reloads), and records the manifest URL. From then on, typing
+`update` on any computer pulls the latest release and reboots. Fetches are
+**cache-busted** (unique query string per request) because GitHub's raw
+CDN caches ~5 minutes; pushes apply instantly. Release flow: edit
+programs → run tests → bump `version` in `deploy/manifest.lua` → push.
+
+This works on an unmodified server because CC:Tweaked's default HTTP rules
+are `DENY $private, ALLOW *` — public URLs pass; only LAN/localhost
+addresses are blocked.
+
+## Bridge (staged, optional — nothing in-game depends on it)
+
+`bridge/server.mjs` is a small Node websocket server: the historian
+streams JSON to it (`bridge.conf` on the historian holds the URL), it
+forwards alerts to a **Discord webhook** (phone pings while away from the
+game) and serves `GET /status` with the latest reading per source — the
+intended data substrate for a future MCP `get_power_status` tool, so an
+MCP layer would query the bridge, never the game.
+
+Because the MC server is rented (no extra processes), the bridge must run
+on some always-on public host — which conveniently means **no CC config
+edits at all** (public URLs already pass the default rules). It's hardened
+for internet exposure: constant-time shared-secret token on every
+connection and `/status` hit, browser-origin upgrades rejected, payload
+and state caps, Discord output mention-disabled/markdown-stripped/
+truncated. Status: code ready; waiting on a hosting choice and a webhook
+URL.
+
+## Development: the headless CC:Tweaked emulator
+
+The reason everything worked first-try in-game. `harness/cc_env.lua`
+(~700 lines, pure Lua) mirrors how CC:Tweaked actually runs programs:
+
+- **The program is a coroutine; `os.pullEventRaw` is `coroutine.yield`.**
+  The scheduler honors the real yield-filter rules (non-matching events
+  are *discarded*, `terminate` always passes) — the subtle semantics that
+  make naive `sleep()` loops eat keypresses in-game.
+- **Time is virtual, in integer game ticks** (1 tick = 0.05s): a 75-second
+  scenario runs in milliseconds, deterministically. `os.clock()` matches
+  the real tick-granular implementation.
+- **`write`/`print`/`sleep` are lifted from the vendored ROM `bios.lua`**,
+  so word-wrapping and scrolling match in-game rendering exactly.
+- **Runs on Lua 5.2.4 built from source** — CC's Cobalt VM (0.9.9) targets
+  5.2 semantics (doubles, `%d` truncates instead of erroring like 5.3+),
+  so version-specific bugs surface here, not in-game.
+- **Mock peripherals match the real APIs** (verified from source): generic
+  `energy_storage` with the Java-int clamp, `me_bridge` (real AP 0.7.62b
+  method names — the original draft of fluxdash called ME Bridge methods
+  that *don't exist*; pcall ate the error and the feature silently never
+  worked — caught here), `block_reader` with drive NBT, scale-aware
+  monitors (text scale changes the character grid like real ones),
+  modems + rednet, `chat_box`, http, an in-memory `fs`.
+- **Scenario hooks** drive tests: `charAt(t, "q")`, `detachAt`/`attachAt`
+  (peripheral events), `rednetAt` (incoming mesh traffic),
+  `snapshotAt`/`monitorSnapshotAt` (mid-run screen captures), plus
+  rendered-screen text assertions and per-cell color tracking.
 
 ```bash
-# run the full test suite (19 tests: v1 characterization + v2 contract)
-toolchain/lua-5.2.4/src/lua tests/run_tests.lua
-
-# eyeball what the dashboard renders in realistic scenarios
-toolchain/lua-5.2.4/src/lua harness/demo.lua
+toolchain/lua-5.2.4/src/lua tests/run_tests.lua   # 47 tests
+toolchain/lua-5.2.4/src/lua harness/demo.lua      # eyeball rendered screens
 ```
 
-The harness (`harness/cc_env.lua`) mirrors how CC:Tweaked really runs
-programs: the program is a coroutine, `os.pullEventRaw` is `coroutine.yield`,
-events are delivered through the same filter rules as the Java
-ComputerThread (non-matching events are discarded, `terminate` always passes),
-and `write`/`print`/`sleep` are lifted from the vendored `bios.lua` so word
-wrapping matches in-game. Time is virtual (integer game ticks), so a
-"10-second" dashboard run completes instantly and deterministically.
+## Verified API facts (ATM10 / MC 1.21.1) — from source, not memory
 
-Mock peripherals provided: generic `energy_storage` blocks (FE capability with
-the Java-int clamp), Advanced Peripherals `me_bridge` (real 0.7.62b API),
-monitors, wired modems. Scenario hooks: `charAt`, `terminateAt`, `detachAt`,
-`attachAt`, `snapshotAt`.
+- CC:T generic energy peripheral: methods `getEnergy`/`getEnergyCapacity`,
+  additional type `"energy_storage"`, returns **Java int**.
+- `peripheral.getType(name)` returns **multiple values** (primary +
+  generic types); `peripheral.hasType(name, type)` is the membership
+  check. Wired-network names are `type_N` (e.g.
+  `appflux:flux_accessor_0`); adjacent blocks attach as side names
+  (`bottom`).
+- Advanced Peripherals 0.7.62b: ME Bridge type **`me_bridge`**; energy
+  methods `getStoredEnergy`/`getEnergyCapacity`/`getEnergyUsage`/
+  `getAverageEnergyInput` in **AE units** (1 AE = 2 FE) — these are the AE
+  grid buffer, *not* flux cells. (`getEnergyStorage`/`getMaxEnergyStorage`
+  do not exist.) Block Reader type **`block_reader`**; Chat Box type
+  **`chat_box`** (`sendMessage`, `sendMessageToPlayer`). Crafting CPUs:
+  `{storage, coProcessors, isBusy, name}`.
+- AppFlux: cells store FE 1:1 as longs; component `appflux:fe_energy`;
+  capability clamped via `AFUtil.clampLong`; accessor I/O unlimited by
+  default (`flux_accessor.io_limit = 0`); exists as block
+  `appflux:flux_accessor` and cable part.
+- Events: `peripheral` / `peripheral_detach`. `os.clock()` = uptime in
+  ticks × 0.05. Default HTTP rules: `DENY $private, ALLOW *`.
 
-## fluxdash (v2)
-
-Dashboard for the FE stored in AppFlux flux cells, read through the Flux
-Accessor, plus AE-network stats via an ME Bridge. See header comments in
-`programs/fluxdash.lua` for setup; see `docs/INGAME-CHECKLIST.md` for the
-first-session walkthrough.
-
-In-game usage:
-
-```
-fluxdash scan          -- inventory of peripherals; saves fluxscan.txt
-fluxdash               -- dashboard on terminal + all attached monitors; q quits
-fluxdash <peripheral>  -- pin a specific energy peripheral by name
-```
-
-Improvements over the first draft (all test-verified, see `tests/`):
-renders to terminal *and* monitors simultaneously, event-driven loop
-(quit key, peripheral attach/detach recovery, monitor resize), smoothed
-FE/t rate over a 10s window, correct ME Bridge API (the draft called
-methods that don't exist in AP 0.7.62b), scan reports generic types and
-writes `fluxscan.txt` for sharing.
-
-## Deployment (live)
-
-This repo is the deploy source: https://github.com/cjwagn1/atm10-cc
-`deploy/manifest.lua` lists every program; `installer.lua`/`update.lua`
-consume it. Bootstrap any in-game computer with ONE command:
+## Repo layout
 
 ```
-wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua dash
-wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua wall
+programs/    the seven CC programs (deployable)
+deploy/      manifest.lua (files + roles + version; the release unit)
+harness/     cc_env.lua emulator + demo.lua scenario renderer
+tests/       run_tests.lua (47 tests; characterization + contract, TDD)
+vendor/      shallow clones: CC-Tweaked, AdvancedPeripherals, AppFlux,
+             ExtendedAE (API ground truth; gitignored)
+toolchain/   Lua 5.2.4 built from source (gitignored)
+bridge/      staged Node websocket → Discord bridge + setup notes
+docs/        RESEARCH.md (file:line evidence), INGAME-CHECKLIST.md
 ```
 
-`dash` = the ME-side sensor computer (runs fluxdash, broadcasts over
-rednet). `wall` = a monitor wall display (runs fluxwall). The installer
-writes `startup.lua`, so computers auto-start after server restarts and
-chunk reloads. Ship an update by pushing here + bumping the manifest
-version; in-game, type `update` on any computer.
+## Version history
 
-(Why GitHub raw: CC's default HTTP rules are `DENY $private, ALLOW *` —
-public URLs work out of the box, LAN hosting would need a config edit.)
-
-## Telemetry mesh
-
-One pub/sub envelope on rednet protocol `"telemetry"`:
-`{ v, source, tick, data }`. Every sensor is a cheap computer + modem;
-displays and the historian subscribe. Current roles:
-
-- **dash** (`fluxdash`) — the original dashboard, publishes source `flux`
-- **me** (`mesensor`) — ME Bridge stats: storage bytes, craft CPU
-  busy/total, AE draw; publishes source `me`
-- **wall** (`fluxwall`) — multi-source display: one auto-rotating page per
-  source (8s, or `n` to flip), purpose-built layouts for `flux`/`me`,
-  generic key/value page for any new source (new sensors need zero wall
-  changes), sparkline row on tall monitors, per-source "NO SIGNAL (Ns)",
-  red banner when the historian raises an alert
-- **historian** (`historian`) — subscribes to everything; persists rings
-  to `telemetry/<source>.log`; alert rules (drop-over-window, silence)
-  announce via an attached Advanced Peripherals **Chat Box** (in-game
-  chat ping) and broadcast as source `alerts` for the wall banner;
-  optional websocket export to `bridge/` (see bridge/README.md)
-
-Legacy note: pre-mesh fluxdash broadcasts (protocol "fluxdash") are still
-accepted by the wall, so update order never matters.
+- **v1–v2** — original dashboard draft rewritten against tests: render to
+  terminal *and* monitors, event-driven loop (quit key, peripheral
+  detach/reattach recovery), real ME Bridge API, scan that saves
+  `fluxscan.txt`.
+- **v3** — the Block Reader hack: true totals + true capacity + true rate.
+- **v4** — rednet broadcast + first monitor-wall client.
+- **v5** — ETA ("full in / empty in") on wall and dashboard.
+- **v6** — telemetry mesh (envelope protocol), `mesensor`, `historian`
+  with drop/silence alerts → Chat Box + wall banner, staged Discord
+  bridge.
+- **v7** — installer roles come from the manifest.
+- **v8** — unified single-screen wall (cards, no page rotation).
 
 ## Roadmap
 
-- [x] In-game validation (2026-06-11): scan + dashboard worked first try;
-      CC:Tweaked 1.117.1 confirmed
-- [x] Beat the 2.147G int clamp — DONE via AP Block Reader facing the flux
-      drive: sums `appflux:fe_energy` cell components (64-bit), derives true
-      capacity from cell types. Confirmed in-game on extendedae:ex_drive
-      (51,847,398,108 FE read exactly). fluxdash v3 + fluxprobe ship it.
-      (ME Bridge `getCells()` was a dead end — flux cells are invisible to it.)
-- [ ] Monitor wall layout pass (bigger fonts/sections per monitor size)
-- [ ] CraftOS-PC as a second-opinion emulator for UI-heavy programs
-- [ ] Git init + GitHub remote + wget-based installer once we're happy
-- [ ] Later: surface this as an MCP `get_power_status` tool (the UI-chat idea)
+- More sensors (one-file each): induction matrix / any FE bank via the
+  generic energy peripheral, mob farm kill rates, essence/mystical
+  agriculture throughput via delta polling.
+- Wall layout niceties: per-card minimum heights, configurable card order.
+- Stand up the bridge (hosting + Discord webhook), then an MCP
+  `get_power_status` tool backed by `GET /status`.
+- Per-realistic-range bar scaling (a 281T cell makes 10G read as 0%).
