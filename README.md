@@ -62,23 +62,34 @@ FE/t rate over a 10s window, correct ME Bridge API (the draft called
 methods that don't exist in AP 0.7.62b), scan reports generic types and
 writes `fluxscan.txt` for sharing.
 
-## Getting scripts onto the server
+## Deployment (live)
 
-CC:Tweaked's default HTTP rules are `DENY $private, ALLOW *` — public
-internet works out of the box, **LAN/localhost addresses are blocked**.
+This repo is the deploy source: https://github.com/cjwagn1/atm10-cc
+`deploy/manifest.lua` lists every program; `installer.lua`/`update.lua`
+consume it. Bootstrap any in-game computer with ONE command:
 
-1. **Paste into the in-game editor** (zero setup): `edit fluxdash`, paste
-   (Ctrl+V), Ctrl then S to save. Fine for iteration right now.
-2. **Pastebin** (zero setup): upload, then in-game `pastebin get <code> fluxdash`.
-3. **GitHub raw (recommended once this repo goes on GitHub)**:
-   `wget https://raw.githubusercontent.com/<user>/atm10-cc/main/programs/fluxdash.lua fluxdash`
-   Re-run to update; later we can add a one-shot installer/updater script.
-4. **Self-hosted HTTP on the server box** (you own it): works, but you must
-   allow your LAN in `config/computercraft-server.toml` http rules first
-   (the `$private` deny rule blocks it by default).
-5. **Admin filesystem drop**: computer files live server-side at
-   `<world>/computercraft/computer/<id>/`; you can scp/SFTP files straight in.
-   (There's no FTP *inside* CC — the http API is GET/POST only.)
+```
+wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua dash
+wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua wall
+```
+
+`dash` = the ME-side sensor computer (runs fluxdash, broadcasts over
+rednet). `wall` = a monitor wall display (runs fluxwall). The installer
+writes `startup.lua`, so computers auto-start after server restarts and
+chunk reloads. Ship an update by pushing here + bumping the manifest
+version; in-game, type `update` on any computer.
+
+(Why GitHub raw: CC's default HTTP rules are `DENY $private, ALLOW *` —
+public URLs work out of the box, LAN hosting would need a config edit.)
+
+## fluxwall (monitor wall)
+
+`fluxdash` broadcasts its state over rednet every refresh; `fluxwall`
+listens (protocol "fluxdash") and renders a big auto-scaled layout on
+every attached monitor: headline FE, capacity + percent, bar, rate, AE
+stats if room, a spinner that ticks on each received packet, and a red
+"NO SIGNAL (Ns)" banner if the feed goes quiet for 10s. Pair wireless or
+ender modems on both computers (ender = unlimited range, cross-dimension).
 
 ## Roadmap
 
