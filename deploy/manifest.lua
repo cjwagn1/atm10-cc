@@ -3,8 +3,12 @@
 -- listed below. Bump `version` whenever programs change; in-game
 -- computers pick it up with a single `update`.
 return {
-  version = 8,
+  version = 9,
   files = {
+    { path = "sled",
+      url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/sled.lua" },
+    { path = "sledctl",
+      url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/sledctl.lua" },
     { path = "fluxdash",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/fluxdash.lua" },
     { path = "fluxwall",
@@ -25,5 +29,7 @@ return {
     wall = "fluxwall",
     me = "mesensor",
     historian = "historian",
+    sled = "sled",
+    sledctl = "sledctl",
   },
 }

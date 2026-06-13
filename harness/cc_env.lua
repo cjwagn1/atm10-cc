@@ -28,6 +28,21 @@ local INT_MAX = 2147483647
 
 local unpack = table.unpack
 
+-- ------------------------------------------------------------- world geometry
+
+-- Minecraft horizontal convention: north=-z, south=+z, east=+x, west=-x
+local FACES = {
+  north = { x = 0, z = -1 }, south = { x = 0, z = 1 },
+  east = { x = 1, z = 0 }, west = { x = -1, z = 0 },
+}
+local LEFT = { north = "west", west = "south", south = "east", east = "north" }
+local RIGHT = { north = "east", east = "south", south = "west", west = "north" }
+local OPP = { north = "south", south = "north", east = "west", west = "east",
+  up = "down", down = "up" }
+local DIRS6 = { "up", "down", "north", "south", "east", "west" }
+
+local function keyOf(x, y, z) return x .. "," .. y .. "," .. z end
+
 -- ------------------------------------------------------------------ colors
 
 local COLOR_NAMES = {
@@ -207,6 +222,8 @@ function M.new(opts)
   self.rednetOpen = {}       -- side -> true
   self.httpFiles = {}        -- url -> body served by the http mock
   self.chatLog = {}          -- messages sent through a chat_box
+  self.publicFreqs = {}      -- PUBLIC inventory-frequency manager (B1/N1)
+  self.mockCalls = {}        -- log of Mekanism-mock method calls
   self.advanced = opts.advanced ~= false
   self.strictColors = opts.strictColors or false
   -- exact string confirmed in-game on Carter's ATM10 v7.0 server
@@ -215,7 +232,125 @@ function M.new(opts)
     self.advanced, self.strictColors, "terminal")
   self.termBuf, self.termApi = buf, t
   self.monitors = {}         -- name -> buf (for assertions)
+
+  -- voxel world + turtle (Project Sled harness extension; SLED-DESIGN §11)
+  self.world = {}            -- "x,y,z" -> block table { id = ..., ... }
+  self.ground = {}           -- "x,y,z" -> list of dropped item stacks
+  if opts.turtle then
+    local o = opts.turtle
+    self.turtle = {
+      pos = { x = o.pos.x, y = o.pos.y, z = o.pos.z },
+      facing = o.facing or "north",
+      fuel = o.fuel or 0,
+      -- advanced turtle default: limit 100,000 (C4, pack
+      -- computercraft-server.toml:200-210)
+      limit = o.limit or 100000,
+      inv = o.inv or {},     -- slot -> { id, count, components }
+      sel = 1,
+    }
+    self.loadedBounds = opts.loadedBounds -- {minX,maxX,minZ,maxZ} or nil
+    self.sideAttach = {}     -- side name -> peripheral entry (or nil)
+  end
   return self
+end
+
+function Env:setBlock(x, y, z, block)
+  self.world[keyOf(x, y, z)] = block
+end
+
+function Env:block(x, y, z)
+  return self.world[keyOf(x, y, z)]
+end
+
+-- --------------------------------------------- side-attached peripherals
+
+local function mkPeriphEntry(name, types, methods)
+  local typeSet = {}
+  for _, ty in ipairs(types) do typeSet[ty] = true end
+  return { name = name, types = types, typeSet = typeSet,
+    methods = methods, attached = true }
+end
+
+-- Which peripheral entry (if any) a turtle side currently touches. A block
+-- exposes its peripheral per absolute face via block.facePeriph — the
+-- miner mock uses this for its port geometry (A4); plain machine blocks
+-- expose all six faces.
+local SIDE_NAMES = { "top", "bottom", "front", "back", "left", "right" }
+
+function Env:computeSidePeriph(side)
+  local t = self.turtle
+  if not t then return nil end
+  local p, dx, dy, dz, face = t.pos, 0, 0, 0, nil
+  if side == "top" then dy, face = 1, "down"
+  elseif side == "bottom" then dy, face = -1, "up"
+  else
+    local dir
+    if side == "front" then dir = t.facing
+    elseif side == "back" then dir = OPP[t.facing]
+    elseif side == "left" then dir = LEFT[t.facing]
+    elseif side == "right" then dir = RIGHT[t.facing] end
+    dx, dz, face = FACES[dir].x, FACES[dir].z, OPP[dir]
+  end
+  local b = self.world[keyOf(p.x + dx, p.y + dy, p.z + dz)]
+  return b and b.facePeriph and b.facePeriph[face] or nil
+end
+
+-- Re-resolve all six sides. Capability-cache refresh happens at the START
+-- of the NEXT tick after a world change (C3 [SOURCE]) — so the deferred
+-- flavor schedules the diff one tick out and a wrap immediately after
+-- place/dig/move sees the OLD state. A turn runs updateInputsImmediately
+-- (synchronous full rescan, C3) — immediate=true.
+function Env:rescanSides(immediate)
+  if not self.turtle then return end
+  local env = self
+  local function apply()
+    for _, side in ipairs(SIDE_NAMES) do
+      local want = env:computeSidePeriph(side)
+      local have = env.sideAttach[side]
+      if want ~= have then
+        if have then env:push("peripheral_detach", side) end
+        env.sideAttach[side] = want
+        if want then env:push("peripheral", side) end
+      end
+    end
+  end
+  if immediate then
+    apply()
+  else
+    self.seq = self.seq + 1
+    self.scheduled[#self.scheduled + 1] =
+      { atTick = self.ticks + 1, seq = self.seq, fn = apply }
+  end
+end
+
+-- Generic single-block machine item: placing it builds a block exposing a
+-- peripheral on every face, tile state initialized from the item's
+-- components (A2 applyImplicitComponents); digging returns a fresh item
+-- carrying the tile state back as components (A2 copy_components loot).
+-- o.makeMethods(state, env) builds the method table over the tile state.
+function Env:machineItem(o)
+  local env = self
+  local function makeBlock(stack, x, y, z, placeDir)
+    local state = {}
+    for k, v in pairs(stack.components or {}) do state[k] = v end
+    local methods = o.makeMethods and o.makeMethods(state, env) or o.methods
+    local entry = mkPeriphEntry(o.id, o.types, methods)
+    local faceP = {}
+    for _, f in ipairs(DIRS6) do faceP[f] = entry end
+    env.world[keyOf(x, y, z)] = {
+      id = o.id, state = state, facePeriph = faceP,
+      onDig = function()
+        env.world[keyOf(x, y, z)] = nil
+        local comps = {}
+        for k, v in pairs(state) do comps[k] = v end
+        return { id = o.id, count = 1, components = comps,
+          makeBlock = makeBlock }
+      end,
+    }
+    return true
+  end
+  return { id = o.id, count = 1, components = o.components or {},
+    makeBlock = makeBlock }
 end
 
 -- ----------------------------------------------------- scheduling helpers
@@ -260,6 +395,25 @@ function Env:attachAt(seconds, name)
     local e = self.periph[name]
     if e then e.attached = true end
     self:push("peripheral", name)
+  end })
+end
+
+-- Force-end the run as if the server restarted / the chunk reloaded: the
+-- Lua VM dies mid-whatever-it-was-doing (C4). An action in flight at that
+-- moment never mutates the world — the C5 queued-but-dropped window.
+function Env:restartAt(seconds)
+  self:scheduleAt(seconds, { fn = function()
+    self.abort = "reboot"
+  end })
+end
+
+-- Same, flavored as a chunk unload: peripherals die with the computer.
+function Env:chunkUnloadAt(seconds)
+  self:scheduleAt(seconds, { fn = function()
+    if self.sideAttach then
+      for side in pairs(self.sideAttach) do self.sideAttach[side] = nil end
+    end
+    self.abort = "chunk_unload"
   end })
 end
 
@@ -358,6 +512,459 @@ function Env:addChatBox(name)
   })
 end
 
+-- ----------------------------------------------- Mekanism Digital Miner mock
+
+-- Verbatim from TileEntityMekanism.validateSecurityIsPublic (A1,
+-- vendor/Mekanism .../tile/base/TileEntityMekanism.java:1647-1651)
+local SECURITY_ERR =
+  "Setter not available due to machine security not being public."
+
+-- Verbatim from TileEntityDigitalMiner.validateCanChangeConfiguration (N1b)
+local IDLE_ERR =
+  "Miner must be stopped and reset before its targeting configuration is changed."
+
+-- Every Mekanism CC call dispatches to the main thread and costs >=1
+-- server tick (A1, CCMethodCaller.java:29-33). Calls are logged so tests
+-- can assert converge/no-op behavior.
+local function wrapMekMethods(env, M)
+  local wrapped = {}
+  for name, fn in pairs(M) do
+    wrapped[name] = function(...)
+      env.ticks = env.ticks + 1
+      env.mockCalls[#env.mockCalls + 1] = name
+      return fn(...)
+    end
+  end
+  return wrapped
+end
+
+-- Method surface per claims A1 + N1b; run-model semantics per N4:
+-- the searcher enum (IDLE/SEARCHING/FINISHED; PAUSED is dead code in
+-- 10.7.19.85) advances on search completion only, `running` is operator
+-- intent and is NEVER auto-cleared on exhaustion, stop() during SEARCHING
+-- interrupts to IDLE while stop() at FINISHED leaves FINISHED (setters
+-- stay locked until reset()), and toMine publishes a configurable number
+-- of ticks AFTER state flips to FINISHED (the N4 transient hazard the
+-- sled must debounce). Mining drains toMine at a CONFIGURABLE mock rate —
+-- sled logic must measure it, never assume it (AM-2).
+local function minerMethods(state, env)
+  -- The miner is ACTIVE — draining energy and mining — only when running,
+  -- search FINISHED+published, targets remain, and the FULL per-tick cost
+  -- is available (A4/N4: the tick gate calls setActive(false) otherwise;
+  -- an underfed miner stalls with a NONZERO buffer). Progress accrues
+  -- through an active-ticks accumulator so stalls and stop()/start()
+  -- freeze it exactly.
+  local function isActive()
+    return state.running == true and state.status == "FINISHED"
+      and env.ticks >= (state.publishTick or 0)
+      and (state.toMine or 0) > 0
+      and (state.energy or 0) >= (state.usagePerTick or 0)
+  end
+
+  local function sync()
+    if state.status == "SEARCHING" and env.ticks >= (state.searchDoneTick or 0) then
+      state.status = "FINISHED"
+      state.publishTick = state.searchDoneTick + (state.publishLagTicks or 1)
+      state.lastSyncTick = state.publishTick
+      state.minedTicks = 0
+    end
+    if state.status == "FINISHED" then
+      local last = state.lastSyncTick or env.ticks
+      if env.ticks > last then
+        if state.running and env.ticks >= (state.publishTick or 0)
+          and (state.energy or 0) >= (state.usagePerTick or 0) then
+          state.minedTicks = (state.minedTicks or 0) + (env.ticks - last)
+        end
+        state.lastSyncTick = env.ticks
+      end
+      if env.ticks < (state.publishTick or 0) then
+        state.toMine = 0 -- the N4 publish-lag transient window
+      else
+        local mined = math.floor((state.minedTicks or 0) * TICK
+          * (state.mineRate or 0))
+        state.toMine = math.max(0, (state.targets or 0) - mined)
+      end
+    end
+  end
+
+  local function guardPublic()
+    if state.security ~= "PUBLIC" then error(SECURITY_ERR, 0) end
+  end
+  local function guardIdle()
+    guardPublic()
+    sync()
+    if state.status ~= "IDLE" then error(IDLE_ERR, 0) end
+  end
+
+  local M = {}
+  function M.getState() sync(); return state.status end
+  function M.isRunning() sync(); return state.running end
+  function M.getToMine() sync(); return state.toMine end
+  function M.start()
+    guardPublic()
+    sync()
+    if state.running and state.status ~= "IDLE" then return end
+    state.running = true
+    if state.status == "IDLE" then
+      -- every start from IDLE triggers a full volume re-scan (A4)
+      state.status = "SEARCHING"
+      state.searchDoneTick = env.ticks + toTicks(state.searchSeconds or 1)
+      state.toMine = 0
+    end
+    -- from FINISHED: the active-ticks accumulator simply resumes
+  end
+  function M.stop()
+    guardPublic()
+    sync()
+    if state.status == "SEARCHING" then
+      -- stop() mid-search interrupts the searcher and resets to IDLE (N1b)
+      state.status, state.toMine = "IDLE", 0
+    end
+    -- at FINISHED: state STAYS FINISHED, setters stay locked (N1b); the
+    -- accumulator freezes because running is false
+    state.running = false
+  end
+  function M.reset()
+    guardPublic()
+    state.status, state.running, state.toMine = "IDLE", false, 0
+  end
+
+  function M.getRadius() return state.radius end
+  function M.getMaxRadius() return 32 end -- pack general.toml:126 (A4/N1b)
+  function M.getMinY() return state.minY end
+  function M.getMaxY() return state.maxY end
+  function M.getSilkTouch() return state.silkTouch end
+  function M.getAutoEject() return state.autoEject end
+  function M.getAutoPull() return state.autoPull end
+  function M.getEnergy() return state.energy end          -- Joules (A1)
+  function M.getMaxEnergy() return state.maxEnergy end
+  function M.getEnergyUsage()
+    -- the purpose-built stall probe (N4): `getActive() ? energyPerTick :
+    -- 0`. NOT active during SEARCHING (the tick gate requires FINISHED
+    -- with targets left), and an underfed buffer (below the full per-tick
+    -- cost) stalls the machine with usage 0 (A4/N4).
+    sync()
+    return isActive() and (state.usagePerTick or 0) or 0
+  end
+  function M.getSecurityMode() return state.security end
+
+  -- N1b setters: validation THROWS rather than clamps, so a successful
+  -- set always reads back exactly (converge-by-readback works)
+  function M.setRadius(r)
+    guardIdle()
+    if r < 0 or r > 32 then
+      error(("Radius '%d' is out of range must be between 0 and %d. (Inclusive)")
+        :format(r, 32), 0)
+    end
+    state.radius = r
+  end
+  function M.setMinY(y)
+    guardIdle()
+    if y < state.minBuild or y > state.maxY then
+      error(("Min Y '%d' is out of range must be between %d and %d. (Inclusive)")
+        :format(y, state.minBuild, state.maxY), 0)
+    end
+    state.minY = y
+  end
+  function M.setMaxY(y)
+    guardIdle()
+    if y < state.minY or y > state.maxBuild - 1 then
+      error(("Max Y '%d' is out of range must be between %d and %d. (Inclusive)")
+        :format(y, state.minY, state.maxBuild - 1), 0)
+    end
+    state.maxY = y
+  end
+  function M.setSilkTouch(b) guardPublic(); state.silkTouch = b end
+  function M.setAutoEject(b) guardPublic(); state.autoEject = b end
+  function M.setAutoPull(b) guardPublic(); state.autoPull = b end
+
+  -- Filters (N1b): the mock supports the one shape the sled ships —
+  -- MINER_TAG_FILTER. Normalization (lowercased tag, defaulted keys)
+  -- mirrors SpecialConverters; duplicates are rejected like the
+  -- LinkedHashSet path.
+  local function normFilter(t)
+    if type(t) ~= "table" or type(t.type) ~= "string" then
+      error("Missing 'type' element", 0)
+    end
+    if t.type:upper() ~= "MINER_TAG_FILTER" then
+      error("Unknown 'type' value", 0)
+    end
+    if type(t.tag) ~= "string" or #t.tag == 0 then
+      error("Invalid or missing tag specified for Tag filter", 0)
+    end
+    return {
+      type = "MINER_TAG_FILTER", tag = t.tag:lower(),
+      enabled = t.enabled == nil and true or t.enabled,
+      requires_replacement = t.requires_replacement or false,
+      replace_target = t.replace_target or "minecraft:air",
+    }
+  end
+  local function sameFilter(a, b)
+    return a.type == b.type and a.tag == b.tag and a.enabled == b.enabled
+      and a.requires_replacement == b.requires_replacement
+      and a.replace_target == b.replace_target
+  end
+  function M.addFilter(t)
+    guardIdle()
+    local f = normFilter(t)
+    for _, x in ipairs(state.filters) do
+      if sameFilter(x, f) then return false end
+    end
+    state.filters[#state.filters + 1] = f
+    return true
+  end
+  function M.removeFilter(t)
+    guardIdle()
+    local f = normFilter(t)
+    for i, x in ipairs(state.filters) do
+      if sameFilter(x, f) then
+        table.remove(state.filters, i)
+        return true
+      end
+    end
+    return false
+  end
+  function M.getFilters()
+    local out = {}
+    for i, x in ipairs(state.filters) do
+      out[i] = { type = x.type, tag = x.tag, enabled = x.enabled,
+        requires_replacement = x.requires_replacement,
+        replace_target = x.replace_target }
+    end
+    return out
+  end
+
+  return wrapMekMethods(env, M)
+end
+
+local function minerDefaults(o)
+  o = o or {}
+  return {
+    radius = o.radius or 10, minY = o.minY or 0, maxY = o.maxY or 60,
+    silkTouch = o.silkTouch or false, autoEject = o.autoEject or false,
+    autoPull = o.autoPull or false, filters = o.filters or {},
+    energy = o.energy or 0, maxEnergy = o.maxEnergy or 50000, -- 50 kJ (A4)
+    security = o.security or "PUBLIC", upgrades = o.upgrades or {},
+    targets = o.targets or 0, searchSeconds = o.searchSeconds or 1,
+    mineRate = o.mineRate or 0, usagePerTick = o.usagePerTick or 0,
+    -- D2 mining-dim build heights; N1b setter validation bounds
+    minBuild = o.minBuild or -64, maxBuild = o.maxBuild or 320,
+    publishLagTicks = o.publishLagTicks or 1,
+  }
+end
+
+-- Named flavor: a miner already attached (wired/adjacent), no world model.
+function Env:addDigitalMiner(name, o)
+  local state = minerDefaults(o)
+  state.status, state.running, state.toMine = "IDLE", false, 0
+  return self:addPeripheral(name, { "digitalMiner" },
+    minerMethods(state, self))
+end
+
+-- Item flavor: places as the 3x3x2 multiblock, digs back to one item.
+function Env:minerItem(o)
+  local env = self
+  local function makeBlock(stack, x, y, z, placeDir)
+    if placeDir ~= "up" then
+      -- C1 [FALSE]: every deploy branch except placeUp leaves the turtle
+      -- inside the bounding volume — placement can never succeed
+      return false, "Cannot place block here"
+    end
+    -- all 17 bounding cells must be free too (C1; main is bottom-center
+    -- of the 3x3x2 volume; the main cell itself was checked by place())
+    for dx = -1, 1 do for dz = -1, 1 do for dy = 0, 1 do
+      if not (dx == 0 and dz == 0 and dy == 0)
+        and env.world[keyOf(x + dx, y + dy, z + dz)] then
+        return false, "Cannot place block here"
+      end
+    end end end
+
+    local state = {}
+    for k, v in pairs(stack.components or {}) do state[k] = v end
+    -- `running` is NBT-only — never rides the item; fresh placement is
+    -- IDLE and stopped, the sled must call start() (A4 skeptic)
+    state.status, state.running, state.toMine = "IDLE", false, 0
+    state.facing = OPP[env.turtle.facing] -- horizontal opposite (C1)
+    local entry = mkPeriphEntry("digitalMiner", { "digitalMiner" },
+      minerMethods(state, env))
+
+    local function breakAll()
+      -- breaking main or any bounding block removes the whole structure
+      -- with a single item drop carrying the config back (A2)
+      for dx = -1, 1 do for dz = -1, 1 do for dy = 0, 1 do
+        env.world[keyOf(x + dx, y + dy, z + dz)] = nil
+      end end end
+      local comps = {}
+      for k, v in pairs(state) do comps[k] = v end
+      comps.status, comps.running, comps.toMine = nil, nil, nil
+      comps.facing, comps.searchDoneTick, comps.mineFromTick = nil, nil, nil
+      return { id = "mekanism:digital_miner", count = 1,
+        components = comps, makeBlock = makeBlock }
+    end
+
+    -- main block: peripheral reachable through its DOWN face only (A1/A4)
+    env.world[keyOf(x, y, z)] = { id = "mekanism:digital_miner",
+      state = state, facePeriph = { down = entry }, onDig = breakAll }
+    for dx = -1, 1 do for dz = -1, 1 do for dy = 0, 1 do
+      if not (dx == 0 and dz == 0 and dy == 0) then
+        env.world[keyOf(x + dx, y + dy, z + dz)] =
+          { id = "mekanism:bounding_block", onDig = breakAll }
+      end
+    end end end
+    -- ports (A4 :1147-1183): energy = outer faces of the left/right
+    -- main-layer bounding blocks; item input = top-center UP face; item
+    -- output = top-back-center back face. Eject target (not a port the
+    -- turtle wraps) = main +up +2*back.
+    local B = OPP[state.facing]
+    local L, R = LEFT[state.facing], RIGHT[state.facing]
+    env.world[keyOf(x + FACES[L].x, y, z + FACES[L].z)].facePeriph = { [L] = entry }
+    env.world[keyOf(x + FACES[R].x, y, z + FACES[R].z)].facePeriph = { [R] = entry }
+    env.world[keyOf(x, y + 1, z)].facePeriph = { up = entry }
+    env.world[keyOf(x + FACES[B].x, y + 1, z + FACES[B].z)].facePeriph =
+      { [B] = entry }
+    return true
+  end
+  return { id = "mekanism:digital_miner", count = 1,
+    components = minerDefaults(o), makeBlock = makeBlock }
+end
+
+-- Quantum Entangloporter surface per claim N1 (the subset the sled and
+-- commissioning use; claim N1 in docs/RESEARCH.md documents the full
+-- 50-method surface in summary form).
+-- Frequencies are GLOBAL state (B1): env.publicFreqs is the PUBLIC
+-- inventory-frequency manager and computers can only create/select/list
+-- PUBLIC frequencies (N1); a PRIVATE frequency rides the item components
+-- but is not reachable from Lua.
+local QE_TYPES = { "ITEM", "FLUID", "CHEMICAL", "ENERGY", "HEAT" }
+local QE_SIDES = { "FRONT", "LEFT", "RIGHT", "BACK", "TOP", "BOTTOM" }
+
+local function qeMethods(state, env)
+  state.sideConfig = state.sideConfig or {}
+  state.ejecting = state.ejecting or {}
+  for _, ty in ipairs(QE_TYPES) do
+    state.sideConfig[ty] = state.sideConfig[ty] or {}
+    -- per-tab auto-eject defaults OFF (B2, ConfigInfo.java:38-43)
+    if state.ejecting[ty] == nil then state.ejecting[ty] = false end
+  end
+
+  local function guardPublic()
+    if (state.security or "PUBLIC") ~= "PUBLIC" then error(SECURITY_ERR, 0) end
+  end
+  -- enum args pass as case-insensitive strings matched against the Java
+  -- enum name() (N1). Rejection goes through CC:Tweaked, not Mekanism:
+  -- CCComputerHelper.getEnum delegates to IArguments.getEnum ->
+  -- LuaValues.checkEnum, "bad argument #"+(index+1)+" (unknown option "
+  -- +value+")" (vendor/CC-Tweaked .../core/lua/LuaValues.java:161-166;
+  -- Mekanism CCComputerHelper.java:21-27, CCMethodCaller.java:52-56
+  -- rethrows the original LuaException) — N1 phase-2.1 addendum.
+  local function normIn(v, list, idx)
+    local up = tostring(v):upper()
+    for _, t in ipairs(list) do if t == up then return t end end
+    error(("bad argument #%d (unknown option %s)"):format(idx or 1,
+      tostring(v)), 0)
+  end
+  local function freqCopy(f)
+    return { key = f.key, security_mode = f.security_mode, owner = f.owner }
+  end
+
+  local M = {}
+  function M.getFrequency()
+    if not state.frequency then
+      error("No frequency is currently selected.", 0) -- N1 verbatim
+    end
+    return freqCopy(state.frequency)
+  end
+  function M.getFrequencies()
+    local out = {}
+    for name, f in pairs(env.publicFreqs) do
+      out[#out + 1] = { key = name, security_mode = "PUBLIC", owner = f.owner }
+    end
+    return out
+  end
+  function M.setFrequency(name)
+    guardPublic()
+    local f = env.publicFreqs[name]
+    if not f then
+      error(("No public inventory frequency with name '%s' found.")
+        :format(name), 0) -- N1 verbatim
+    end
+    state.frequency = { key = name, security_mode = "PUBLIC", owner = f.owner }
+  end
+  function M.createFrequency(name)
+    guardPublic()
+    if env.publicFreqs[name] then
+      error(("Unable to create public inventory frequency with name '%s' as one already exists.")
+        :format(name), 0) -- N1 verbatim
+    end
+    local owner = state.owner or "owner"
+    env.publicFreqs[name] = { owner = owner }
+    state.frequency = { key = name, security_mode = "PUBLIC", owner = owner }
+  end
+
+  function M.getConfigurableTypes()
+    local out = {}
+    for i, t in ipairs(QE_TYPES) do out[i] = t end
+    return out
+  end
+  function M.getSupportedModes(ty)
+    ty = normIn(ty, QE_TYPES)
+    -- HEAT supports {NONE, INPUT_OUTPUT} only (N1 skeptic correction)
+    if ty == "HEAT" then return { "NONE", "INPUT_OUTPUT" } end
+    return { "NONE", "INPUT", "OUTPUT", "INPUT_OUTPUT" }
+  end
+  function M.getMode(ty, side)
+    return state.sideConfig[normIn(ty, QE_TYPES)][normIn(side, QE_SIDES)]
+      or "NONE"
+  end
+  function M.setMode(ty, side, mode)
+    guardPublic()
+    ty, side = normIn(ty, QE_TYPES), normIn(side, QE_SIDES)
+    mode = normIn(mode, M.getSupportedModes(ty))
+    state.sideConfig[ty][side] = mode
+  end
+  function M.canEject(ty)
+    -- the heat tab is not ejectable on the real QE (fidelity review)
+    return normIn(ty, QE_TYPES) ~= "HEAT"
+  end
+  function M.isEjecting(ty)
+    return state.ejecting[normIn(ty, QE_TYPES)] == true
+  end
+  function M.setEjecting(ty, b)
+    guardPublic()
+    ty = normIn(ty, QE_TYPES)
+    if ty == "HEAT" then return end
+    state.ejecting[ty] = b == true
+  end
+
+  function M.getEnergy() return state.energy or 0 end
+  function M.getMaxEnergy() return state.maxEnergy or 0 end
+  function M.getEnergyFilledPercentage()
+    -- with NO frequency the container list is empty and Mekanism's
+    -- divideToLevel(0, 0) returns 1.0, not 0 (N1 skeptic correction)
+    if not state.frequency or (state.maxEnergy or 0) == 0 then return 1.0 end
+    return (state.energy or 0) / state.maxEnergy
+  end
+  function M.getSecurityMode() return state.security or "PUBLIC" end
+  function M.getOwnerName() return state.owner or "owner" end
+  function M.getOwnerUUID()
+    return state.ownerUUID or "00000000-0000-0000-0000-000000000000"
+  end
+
+  return wrapMekMethods(env, M)
+end
+
+function Env:qeItem(o)
+  o = o or {}
+  local comps = o.components or {}
+  if comps.security == nil then comps.security = "PUBLIC" end
+  return self:machineItem{
+    id = "mekanism:quantum_entangloporter",
+    types = { "quantumEntangloporter" },
+    makeMethods = qeMethods,
+    components = comps,
+  }
+end
+
 -- Monitor mock, two flavors:
 --   { w=, h= }          fixed size, setTextScale is a no-op (legacy tests)
 --   { baseW=, baseH= }  scale-aware: size at textScale 1; like real CC,
@@ -435,21 +1042,281 @@ function Env:monitorText(name)
   return buf and screenText(buf) or nil
 end
 
+-- -------------------------------------------------------------- turtle mock
+
+-- The `turtle` global (a global, not a peripheral — SLED-DESIGN §11).
+-- Move-command check order mirrors TurtleMoveCommand.execute @ CC:T
+-- v1.21.1-1.117.1: canEnter incl. "Cannot leave loaded world" (:84) ->
+-- obstruction "Movement obstructed" (:44,:51) -> fuel "Out of fuel" (:55)
+-- -> teleport -> consumeFuel(1). Turns never consume fuel (C4,
+-- TurtleTurnCommand.java:20-31). Every world-touching command takes one
+-- 0.4s turtle action, implemented on the same virtual-timer machinery as
+-- the rest of the harness so scenario hooks (restartAt / chunkUnloadAt)
+-- can fire mid-action — i.e. BEFORE the world mutates, exactly the
+-- queued-but-dropped command window C5 reconciliation exists for.
+local function buildTurtleApi(env, osT)
+  local T = {}
+  local t = env.turtle
+
+  local function takeTime()
+    local id = osT.startTimer(0.4)
+    while true do
+      local ev, a = coroutine.yield("timer")
+      if ev == "timer" and a == id then return end
+    end
+  end
+
+  -- dir: "front" | "back" | "up" | "down" (front/back relative to facing)
+  local function targetCell(dir)
+    local p = t.pos
+    if dir == "up" then return p.x, p.y + 1, p.z end
+    if dir == "down" then return p.x, p.y - 1, p.z end
+    local f = FACES[t.facing]
+    local s = dir == "back" and -1 or 1
+    return p.x + f.x * s, p.y, p.z + f.z * s
+  end
+
+  local function move(dir)
+    takeTime()
+    local x, y, z = targetCell(dir)
+    if env.loadedBounds then
+      local b = env.loadedBounds
+      if x < b.minX or x > b.maxX or z < b.minZ or z > b.maxZ then
+        return false, "Cannot leave loaded world"
+      end
+    end
+    if env.world[keyOf(x, y, z)] then
+      return false, "Movement obstructed"
+    end
+    if t.fuel < 1 then return false, "Out of fuel" end
+    t.pos.x, t.pos.y, t.pos.z = x, y, z
+    t.fuel = t.fuel - 1
+    env:rescanSides(false)
+    return true
+  end
+
+  function T.forward() return move("front") end
+  function T.back() return move("back") end
+  function T.up() return move("up") end
+  function T.down() return move("down") end
+
+  function T.turnLeft()
+    takeTime()
+    t.facing = LEFT[t.facing]
+    env:rescanSides(true)
+    return true
+  end
+  function T.turnRight()
+    takeTime()
+    t.facing = RIGHT[t.facing]
+    env:rescanSides(true)
+    return true
+  end
+
+  local function detect(dir)
+    local x, y, z = targetCell(dir)
+    return env.world[keyOf(x, y, z)] ~= nil
+  end
+  function T.detect() return detect("front") end
+  function T.detectUp() return detect("up") end
+  function T.detectDown() return detect("down") end
+
+  local function inspect(dir)
+    local x, y, z = targetCell(dir)
+    local b = env.world[keyOf(x, y, z)]
+    if not b then return false, "No block to inspect" end
+    return true, { name = b.id, state = b.state or {}, tags = b.tags or {} }
+  end
+  function T.inspect() return inspect("front") end
+  function T.inspectUp() return inspect("up") end
+  function T.inspectDown() return inspect("down") end
+
+  -- Insert a stack CC-style: selected slot first, then ascending; merge
+  -- only on same id AND same components table (CC merges via
+  -- ItemStack.isSameItemSameComponents, InventoryUtil.java:130-134 — so
+  -- two differently-configured machines never stack, B1).
+  local function sameStack(a, b)
+    if a.id ~= b.id then return false end
+    if a.components or b.components then
+      return a.components == b.components
+    end
+    return true
+  end
+  local function giveItem(stack)
+    local order = { t.sel }
+    for i = 1, 16 do if i ~= t.sel then order[#order + 1] = i end end
+    for _, i in ipairs(order) do
+      local s = t.inv[i]
+      if s and sameStack(s, stack) and s.count + stack.count <= 64 then
+        s.count = s.count + stack.count
+        return true
+      end
+    end
+    for _, i in ipairs(order) do
+      if not t.inv[i] then
+        t.inv[i] = stack
+        return true
+      end
+    end
+    return false
+  end
+
+  -- Drops land at the broken cell; C2: a full inventory does NOT fail the
+  -- dig — overflow drops on the ground and the command still succeeds.
+  local function dropAt(key, stack)
+    local g = env.ground[key] or {}
+    g[#g + 1] = stack
+    env.ground[key] = g
+  end
+
+  local function place(dir)
+    takeTime()
+    local stack = t.inv[t.sel]
+    -- "No items to place": TurtlePlaceCommand.java:52
+    if not stack or stack.count < 1 then return false, "No items to place" end
+    local x, y, z = targetCell(dir)
+    -- "Cannot place block here": TurtlePlaceCommand.java:73
+    if env.world[keyOf(x, y, z)] then return false, "Cannot place block here" end
+    if stack.makeBlock then
+      -- machine items place through their own hook (bounding-volume and
+      -- facing rules live there); on false the item is retained (C1)
+      local ok, err = stack.makeBlock(stack, x, y, z, dir)
+      if not ok then return false, err end
+    else
+      env.world[keyOf(x, y, z)] = { id = stack.id, components = stack.components }
+    end
+    stack.count = stack.count - 1
+    if stack.count == 0 then t.inv[t.sel] = nil end
+    env.worldOps = (env.worldOps or 0) + 1
+    env:rescanSides(false)
+    return true
+  end
+  function T.place() return place("front") end
+  function T.placeUp() return place("up") end
+  function T.placeDown() return place("down") end
+
+  local function dig(dir)
+    takeTime()
+    local x, y, z = targetCell(dir)
+    local key = keyOf(x, y, z)
+    local b = env.world[key]
+    -- "Nothing to dig here": TurtleTool.java:280
+    if not b then return false, "Nothing to dig here" end
+    local stack
+    if b.onDig then
+      stack = b.onDig(env, x, y, z)
+    else
+      env.world[key] = nil
+      stack = { id = b.id, count = 1, components = b.components }
+    end
+    if stack and not giveItem(stack) then dropAt(key, stack) end
+    env.worldOps = (env.worldOps or 0) + 1
+    env:rescanSides(false)
+    return true
+  end
+  function T.dig() return dig("front") end
+  function T.digUp() return dig("up") end
+  function T.digDown() return dig("down") end
+
+  local function suck(dir)
+    takeTime()
+    local x, y, z = targetCell(dir)
+    local key = keyOf(x, y, z)
+    local g = env.ground[key]
+    -- "No items to take": TurtleSuckCommand.java:55,68
+    if not g or #g == 0 then return false, "No items to take" end
+    local stack = g[1]
+    if not giveItem(stack) then return false, "No space for items" end
+    table.remove(g, 1)
+    if #g == 0 then env.ground[key] = nil end
+    return true
+  end
+  function T.suck() return suck("front") end
+  function T.suckUp() return suck("up") end
+  function T.suckDown() return suck("down") end
+
+  -- fuel = burnTime/20 (C4, FurnaceRefuelHandler.java:36-38); values below
+  -- are the S3-verified pack numbers; override per-env via env.fuelValues
+  local FUEL_VALUES = {
+    ["minecraft:coal"] = 80, ["minecraft:charcoal"] = 80,
+    ["minecraft:coal_block"] = 800, ["minecraft:blaze_rod"] = 120,
+    ["minecraft:lava_bucket"] = 1000,
+  }
+  function T.refuel(n)
+    takeTime()
+    local s = t.inv[t.sel]
+    -- "No items to combust" / "Items not combustible":
+    -- TurtleRefuelCommand.java:24,27
+    if not s then return false, "No items to combust" end
+    local per = (env.fuelValues and env.fuelValues[s.id]) or FUEL_VALUES[s.id]
+    if not per then return false, "Items not combustible" end
+    if n == 0 then return true end
+    local take = math.min(n or 64, s.count)
+    -- refuel(n) self-caps at the limit (C4, FurnaceRefuelHandler.java:
+    -- 21-23); the last item's overfill is clamped and wasted
+    -- (TurtleBrain.java:365-366)
+    local used = 0
+    while used < take and t.fuel < t.limit do
+      t.fuel = math.min(t.limit, t.fuel + per)
+      used = used + 1
+    end
+    s.count = s.count - used
+    if s.count == 0 then t.inv[t.sel] = nil end
+    return true
+  end
+
+  function T.getFuelLevel() return t.fuel end
+  function T.getFuelLimit() return t.limit end
+
+  function T.select(n)
+    if type(n) ~= "number" or n < 1 or n > 16 then
+      error("bad argument #1 (slot out of range)", 2)
+    end
+    t.sel = math.floor(n)
+    return true
+  end
+  function T.getSelectedSlot() return t.sel end
+  function T.getItemCount(slot)
+    local s = t.inv[slot or t.sel]
+    return s and s.count or 0
+  end
+  function T.getItemDetail(slot)
+    local s = t.inv[slot or t.sel]
+    if not s then return nil end
+    return { name = s.id, count = s.count }
+  end
+
+  return T
+end
+
 -- --------------------------------------------------------- sandbox builder
 
 local function buildPeripheralApi(env)
   local P = {}
 
+  local SIDES = { top = true, bottom = true, front = true,
+    back = true, left = true, right = true }
+
+  local function sideEntry(name)
+    if env.sideAttach and SIDES[name] then return env.sideAttach[name] end
+    return nil
+  end
+
   local function entryFor(name)
     local e = env.periph[name]
     if e and e.attached then return e end
-    return nil
+    return sideEntry(name)
   end
 
   function P.getNames()
     local out = {}
     for _, name in ipairs(env.periphOrder) do
       if env.periph[name].attached then out[#out + 1] = name end
+    end
+    if env.sideAttach then
+      for _, side in ipairs(SIDE_NAMES) do
+        if env.sideAttach[side] then out[#out + 1] = side end
+      end
     end
     return out
   end
@@ -502,6 +1369,29 @@ local function buildPeripheralApi(env)
 
   function P.wrap(name)
     local e = env.periph[name]
+    if (not e or not e.attached) and sideEntry(name) then
+      -- Side-attached (turtle) peripheral: closures resolve the CURRENT
+      -- attachment at call time, so a stale handle silently returns nil
+      -- from every method (never errors) and transparently rebinds after
+      -- a re-place — C3 [SOURCE], peripheral.lua:255-268,284-287.
+      e = sideEntry(name)
+      local wrapped = {}
+      for m in pairs(e.methods) do
+        wrapped[m] = function(...)
+          local cur = sideEntry(name)
+          if not cur then return nil end
+          local fn = cur.methods[m]
+          if not fn then return nil end
+          return fn(...)
+        end
+      end
+      local types = {}
+      for i, ty in ipairs(e.types) do types[i] = ty end
+      for ty in pairs(e.typeSet) do types[ty] = true end
+      return setmetatable(wrapped,
+        { __name = "peripheral", name = name, type = e.types[1],
+          types = types, typeSet = e.typeSet })
+    end
     if not e or not e.attached then return nil end
     local wrapped = {}
     for m in pairs(e.methods) do
@@ -656,8 +1546,10 @@ local function buildSandbox(env)
     end
     return unpack(eventData, 1, eventData.n)
   end
+  -- reboot and shutdown both end the run with reason "shutdown" (the
+  -- pre-sled suite pins that); res.reboot distinguishes them (§11.4)
   function osT.shutdown() error("__shutdown__", 0) end
-  osT.reboot = osT.shutdown
+  function osT.reboot() error("__reboot__", 0) end
   G.os = osT
 
   function G.sleep(t)
@@ -667,6 +1559,10 @@ local function buildSandbox(env)
     until param == timer
   end
   osT.sleep = G.sleep
+
+  if env.turtle then
+    G.turtle = buildTurtleApi(env, osT)
+  end
 
   -- ------------------------------------------------------------ rednet
   -- Outbound traffic is logged to env.rednetSent for assertions; inbound
@@ -734,6 +1630,28 @@ local function buildSandbox(env)
         getResponseCode = function() return 200 end,
         close = function() end,
       }
+    end,
+  }
+
+  -- ------------------------------------------------------------- shell
+  -- Minimal shell for programs that chain into others (sled/sledctl run
+  -- the standard updater). Resolves the virtual fs first, then
+  -- programs/<name>.lua on disk. Reboot/shutdown sentinels propagate.
+  G.shell = {
+    run = function(name)
+      local src = env.files[name] or env.files[name .. ".lua"]
+      if not src then
+        local f = io.open("programs/" .. name .. ".lua", "r")
+        if f then
+          src = f:read("*a")
+          f:close()
+        end
+      end
+      if not src then return false end
+      local chunk, err = load(src, "@" .. name, "t", G)
+      if not chunk then error(err, 0) end
+      chunk()
+      return true
     end,
   }
 
@@ -840,6 +1758,7 @@ function Env:nextEvent(maxTick)
       local item = table.remove(self.scheduled, bestKey)
       if item.fn then
         item.fn(self)
+        if self.abort then return nil, self.abort end
       else
         self:push(unpack(item.ev))
       end
@@ -852,13 +1771,36 @@ end
 
 function Env:run(path, args, opts)
   opts = opts or {}
-  local maxTick = toTicks(opts.maxTime or 10)
+  -- maxTime is RELATIVE to the persistent virtual clock so multi-boot
+  -- scenarios can call run() repeatedly (§11.5)
+  local maxTick = self.ticks + toTicks(opts.maxTime or 10)
   args = args or {}
 
-  local f = io.open(path, "r")
-  if not f then error("cannot open program: " .. path, 2) end
-  local src = f:read("*a")
-  f:close()
+  -- fresh boot: real CC drops the event queue and all timers (C4); the
+  -- scenario script (self.scheduled) survives — it is the test's world,
+  -- not the computer's state. Peripherals present at boot are visible
+  -- immediately, with no attach events.
+  self.queue = {}
+  self.timers = {}
+  self.abort = nil
+  if self.turtle then
+    for _, side in ipairs({ "top", "bottom", "front", "back", "left", "right" }) do
+      self.sideAttach[side] = self:computeSidePeriph(side)
+    end
+  end
+
+  local src
+  if opts.fromVirtualFs then
+    -- boot from the in-memory fs (e.g. a startup.lua an installer wrote);
+    -- part of the multi-boot driver (SLED-DESIGN §11.5)
+    src = self.files[path]
+    if not src then error("cannot open program (virtual): " .. path, 2) end
+  else
+    local f = io.open(path, "r")
+    if not f then error("cannot open program: " .. path, 2) end
+    src = f:read("*a")
+    f:close()
+  end
 
   local G = buildSandbox(self)
   local chunkName = "@" .. path:match("[^/]+$")
@@ -875,6 +1817,9 @@ function Env:run(path, args, opts)
     if not ok then
       if filter == "__shutdown__" then
         return { reason = "shutdown" }
+      end
+      if filter == "__reboot__" then
+        return { reason = "shutdown", reboot = true }
       end
       return { reason = "error", err = filter }
     end

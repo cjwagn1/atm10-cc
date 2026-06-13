@@ -24,10 +24,16 @@ local SNAP_EVERY = 10    -- seconds between disk flushes
 local RING_MAX   = 360   -- samples kept per source
 local COOLDOWN   = 300   -- seconds between repeats of the same alert
 
--- key = "energy" means data.trueE or data.e (works for flux sensors)
+-- key = "energy" means data.trueE or data.e (works for flux sensors).
+-- `source` accepts an exact name, "*", or a trailing-* prefix ("sled*").
+-- `equals` rules fire when a string field has held one value for
+-- forSeconds (the E2 "stuck" extension; a stuck-but-broadcasting sled
+-- refreshes lastSeen, so silence rules can never catch it).
 local ALERTS = {
   { source = "flux", key = "energy", dropPct = 40, window = 300 },
   { source = "*", silentFor = 60 },
+  { source = "sled*", key = "state", equals = "RELOCATE", forSeconds = 900 },
+  { source = "sled*", key = "state", equals = "RECOVER", forSeconds = 30 },
 }
 
 -- ------------------------------------------------------------- utilities
@@ -90,6 +96,12 @@ end
 local function metricOf(rule, data)
   if rule.key == "energy" then return data.trueE or data.e end
   return data[rule.key]
+end
+
+local function sourceMatches(pattern, name)
+  if pattern == "*" or pattern == name then return true end
+  local prefix = pattern:match("^(.*)%*$")
+  return prefix ~= nil and name:sub(1, #prefix) == prefix
 end
 
 -- ----------------------------------------------------------- peripherals
@@ -174,7 +186,7 @@ end
 local function checkDropRules(name, src)
   local now = os.clock()
   for i, rule in ipairs(ALERTS) do
-    if rule.dropPct and rule.source == name
+    if rule.dropPct and sourceMatches(rule.source, name)
       and (not fired[i] or now - fired[i] >= COOLDOWN) then
       local cur = src.ring[#src.ring]
       local baseline
@@ -204,11 +216,44 @@ local function checkSilenceRules()
   for _, rule in ipairs(ALERTS) do
     if rule.silentFor then
       for name, src in pairs(sources) do
-        if (rule.source == "*" or rule.source == name)
+        if sourceMatches(rule.source, name)
           and now - src.lastSeen > rule.silentFor and not src.silenced then
           src.silenced = true
           announce(("%s telemetry silent for %ds"):format(
             name, math.floor(now - src.lastSeen)))
+        end
+      end
+    end
+  end
+end
+
+-- "stuck" rules: scan the ring backwards for the contiguous trailing run
+-- where data[key] == equals; fire when that run has lasted forSeconds.
+-- Cooldown is keyed per rule AND source (one stuck sled must not silence
+-- alerts for another) — the four E2 touch points.
+local function checkStuckRules()
+  local now = os.clock()
+  for i, rule in ipairs(ALERTS) do
+    if rule.equals then
+      for name, src in pairs(sources) do
+        if sourceMatches(rule.source, name) and #src.ring > 0 then
+          local key = i .. ":" .. name
+          if not fired[key] or now - fired[key] >= COOLDOWN then
+            local firstT
+            for k = #src.ring, 1, -1 do
+              local s = src.ring[k]
+              if s.d and s.d[rule.key] == rule.equals then
+                firstT = s.t
+              else
+                break
+              end
+            end
+            if firstT and now - firstT >= rule.forSeconds then
+              fired[key] = now
+              announce(("%s %s has been %s for %ds"):format(
+                name, rule.key, rule.equals, math.floor(now - firstT)))
+            end
+          end
         end
       end
     end
@@ -244,7 +289,9 @@ local function ingest(envelope)
   src.silenced = false
   local v
   for _, rule in ipairs(ALERTS) do
-    if rule.key and (rule.source == name or rule.source == "*") then
+    -- equals-rules watch STRING fields; they must never populate the
+    -- numeric ring metric (E2 ingest guard)
+    if rule.key and not rule.equals and sourceMatches(rule.source, name) then
       v = metricOf(rule, envelope.data)
       break
     end
@@ -309,6 +356,7 @@ while true do
     snapTimer = os.startTimer(SNAP_EVERY)
   elseif ev[1] == "timer" and ev[2] == tickTimer then
     checkSilenceRules()
+    checkStuckRules()
     render()
     tickTimer = os.startTimer(1)
   elseif ev[1] == "peripheral" or ev[1] == "peripheral_detach" then

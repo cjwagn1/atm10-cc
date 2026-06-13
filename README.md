@@ -11,12 +11,16 @@ Two things make this repo unusual:
 1. **Every program is tested before it ever touches the server** — in a
    purpose-built headless CC:Tweaked emulator (`harness/`), against mock
    peripherals whose APIs were verified by reading the actual mod sources
-   (vendored under `vendor/`). 47 tests, written TDD-style (red → green).
+   (vendored under `vendor/`). 94 tests across two suites, written
+   TDD-style (red → green) — including a kill-sweep that reboots the sled
+   turtle at every half-second of its work cycle and demands convergence.
 2. **It reads the true network energy past the 32-bit API ceiling** — a
    source-verified workaround documented below, validated in-game to the
    exact FE.
 
-Everything described here is deployed and confirmed working in-game.
+Everything through v8 is deployed and confirmed working in-game; v9
+(Project Sled) is fully harness-verified and awaits its first in-game
+deployment (docs/SLED-RUNBOOK.md).
 
 ---
 
@@ -67,6 +71,8 @@ alert; a source that goes quiet shows `NO SIGNAL (Ns)` inline.
 | `fluxwall`  | `wall`      | Display client: unified card view of every source heard on the mesh |
 | `historian` | `historian` | Records rolling history per source to disk, evaluates alert rules, announces via Chat Box (in-game chat) + broadcasts source `alerts`, optional websocket export |
 | `fluxprobe` | —           | Diagnostic: dumps whatever a Block Reader sees, sums every `fe_energy` value at any depth, saves `fluxdump.txt` |
+| `sled`      | `sled`      | **Project Sled**: a turtle that runs a self-relocating Digital Miner skid in the mining dimension — mines until exhausted, breaks the skid, walks the lane, rebuilds, restarts; journaled write-ahead state survives chunk unloads at any instant; turtle-led commissioning; publishes source `sled<N>` (docs/SLED-DESIGN.md, docs/SLED-RUNBOOK.md) |
+| `sledctl`   | `sledctl`   | Fleet console: compact per-sled status table + token-gated fleet-wide `update` broadcast |
 | `installer` / `update` | — | One-command bootstrap + self-update for every computer (below) |
 
 ## The headline hack: true totals past 2,147,483,647 FE
@@ -126,6 +132,7 @@ Current sources:
 |----------|-------------|
 | `flux`   | `trueE`, `trueCap`, `cells` (via block reader); `e`, `cap` (clamped capability fallback); `rate` (FE/t, smoothed 10s); `srcName`; `ae`, `aeMax`, `aeUse`, `aeIn` (ME Bridge AE-unit grid stats, 1 AE = 2 FE) |
 | `me`     | `usedBytes`, `totalBytes`, `availBytes` (item storage cells); `cpus`, `cpusBusy` (crafting CPUs); `aeUse` (AE/t) |
+| `sled<N>`| `state` (MINING/RELOCATE/RECOVER), `step`, `pos` (string), `hops`, `fuel`, `targets`, `miner` (0/1), `rate` (measured blocks/s), `eta`, `jpt`, `err`, `warn` |
 | `alerts` | `msg` (historian-computed event; the wall shows it as a banner) |
 
 **Adding a sensor = one small program**: read something, broadcast an
@@ -147,8 +154,14 @@ of `historian.lua`:
 local ALERTS = {
   { source = "flux", key = "energy", dropPct = 40, window = 300 },
   { source = "*", silentFor = 60 },
+  { source = "sled*", key = "state", equals = "RELOCATE", forSeconds = 900 },
+  { source = "sled*", key = "state", equals = "RECOVER", forSeconds = 30 },
 }
 ```
+
+`equals` rules catch a source STUCK in one state (a stuck-but-broadcasting
+sled refreshes its lastSeen, so silence rules can never see it); rule
+sources accept exact names, `*`, or a trailing-`*` prefix.
 
 Drop rules compare the newest sample to the oldest within the window
 ("flux energy dropped 45% in 5m (10.00G -> 5.50G)"); silence rules fire
@@ -161,8 +174,8 @@ to the bridge.
 ## Deployment
 
 Bootstrap any fresh computer with one command (roles: `dash`, `wall`,
-`me`, `historian` — the role list lives in `deploy/manifest.lua`, so new
-roles never require installer changes):
+`me`, `historian`, `sled`, `sledctl` — the role list lives in
+`deploy/manifest.lua`, so new roles never require installer changes):
 
 ```
 wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua <role>
@@ -201,7 +214,7 @@ URL.
 ## Development: the headless CC:Tweaked emulator
 
 The reason everything worked first-try in-game. `harness/cc_env.lua`
-(~700 lines, pure Lua) mirrors how CC:Tweaked actually runs programs:
+(~1800 lines, pure Lua) mirrors how CC:Tweaked actually runs programs:
 
 - **The program is a coroutine; `os.pullEventRaw` is `coroutine.yield`.**
   The scheduler honors the real yield-filter rules (non-matching events
@@ -228,9 +241,20 @@ The reason everything worked first-try in-game. `harness/cc_env.lua`
   rendered-screen text assertions and per-cell color tracking.
 
 ```bash
-toolchain/lua-5.2.4/src/lua tests/run_tests.lua   # 47 tests
-toolchain/lua-5.2.4/src/lua harness/demo.lua      # eyeball rendered screens
+toolchain/lua-5.2.4/src/lua tests/run_tests.lua       # 47 tests (telemetry suite)
+toolchain/lua-5.2.4/src/lua tests/run_sled_tests.lua  # 47 tests (Project Sled)
+toolchain/lua-5.2.4/src/lua harness/demo.lua          # eyeball rendered screens
 ```
+
+The sled suite adds to the emulator: a `turtle` global over a voxel
+world (moves/digs/places with real fuel + verbatim error strings),
+one-tick-late peripheral attach (C3 semantics — it caught a real
+same-tick-wrap bug in review), Digital Miner and Quantum Entangloporter
+mocks built method-by-method from the vendored Mekanism source (verbatim
+security/validation errors, the corrected FINISHED/`running` semantics,
+the toMine publish-lag hazard), `restartAt`/`chunkUnloadAt` scenario
+hooks, and a multi-boot driver (relative deadlines, boot queue flush,
+virtual-fs startup).
 
 ## Verified API facts (ATM10 / MC 1.21.1) — from source, not memory
 
@@ -258,15 +282,16 @@ toolchain/lua-5.2.4/src/lua harness/demo.lua      # eyeball rendered screens
 ## Repo layout
 
 ```
-programs/    the seven CC programs (deployable)
+programs/    the nine CC programs (deployable)
 deploy/      manifest.lua (files + roles + version; the release unit)
 harness/     cc_env.lua emulator + demo.lua scenario renderer
-tests/       run_tests.lua (47 tests; characterization + contract, TDD)
+tests/       run_tests.lua (47) + run_sled_tests.lua (Project Sled; TDD)
 vendor/      shallow clones: CC-Tweaked, AdvancedPeripherals, AppFlux,
              ExtendedAE (API ground truth; gitignored)
 toolchain/   Lua 5.2.4 built from source (gitignored)
 bridge/      staged Node websocket → Discord bridge + setup notes
-docs/        RESEARCH.md (file:line evidence), INGAME-CHECKLIST.md
+docs/        RESEARCH.md (file:line evidence), SLED-DESIGN.md,
+             SLED-RUNBOOK.md, INGAME-CHECKLIST.md
 ```
 
 ## Version history
@@ -283,6 +308,10 @@ docs/        RESEARCH.md (file:line evidence), INGAME-CHECKLIST.md
   bridge.
 - **v7** — installer roles come from the manifest.
 - **v8** — unified single-screen wall (cards, no page rotation).
+- **v9** — Project Sled: `sled` (self-relocating Digital Miner skid,
+  journal + boot reconciliation, turtle-led commissioning, measured-rate
+  telemetry), `sledctl` fleet console, wall sled card + `sources=`
+  filter, historian stuck rules (`RELOCATE` 900s / `RECOVER` 30s).
 
 ## Roadmap
 

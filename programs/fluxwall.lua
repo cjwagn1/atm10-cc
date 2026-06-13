@@ -24,6 +24,44 @@ local RING_MAX    = 120   -- history points kept per source (sparkline)
 local PROTOCOL    = "telemetry"
 local MIN_W, MIN_H = 22, 6
 
+-- Optional source filter so a monitor can be dedicated to one family of
+-- sources (AM-6: a sled-only wall). Patterns are exact names or a prefix
+-- ending in `*`; pass as an argument (`fluxwall sources=sled*`) or as the
+-- first line of fluxwall.conf (`sources=sled*,flux`). Alert banners
+-- always pass.
+local sourceFilter
+do
+  local args = { ... }
+  local spec
+  for _, a in ipairs(args) do
+    spec = a:match("^sources=(.+)$") or spec
+  end
+  if not spec then
+    local f = fs.open("fluxwall.conf", "r")
+    if f then
+      local line = f.readLine()
+      f.close()
+      if line then spec = line:match("^sources=(.+)$") end
+    end
+  end
+  if spec then
+    sourceFilter = {}
+    for p in spec:gmatch("[^,%s]+") do
+      sourceFilter[#sourceFilter + 1] = p
+    end
+  end
+end
+
+local function passesFilter(name)
+  if not sourceFilter or name == "alerts" then return true end
+  for _, p in ipairs(sourceFilter) do
+    if p == "*" or p == name then return true end
+    local prefix = p:match("^(.*)%*$")
+    if prefix and name:sub(1, #prefix) == prefix then return true end
+  end
+  return false
+end
+
 local colors = colors
 local function col(name) return colors[name] end
 
@@ -203,6 +241,40 @@ local function genericLines(label)
   end
 end
 
+-- Purpose-built card for sled* sources (AM-6), replacing the generic
+-- key/value card for this family: big state line, red reason in RECOVER,
+-- step progress while relocating, targets remaining with the sled's
+-- MEASURED rate + ETA (AM-2), stations completed + fuel, sparkline of
+-- targets. Multi-sled comes free: each fleet id is its own card.
+local function sledLines(label)
+  return function(d, ring, w)
+    local stateColor = d.state == "MINING" and col("lime")
+      or d.state == "RECOVER" and col("red") or col("yellow")
+    local L = {}
+    L[#L + 1] = row(seg(label .. " ", col("yellow")),
+      seg(tostring(d.state or "?"), stateColor),
+      d.miner == 1 and seg("  *", col("lime")) or nil)
+    if d.err then
+      L[#L + 1] = row(seg("! " .. tostring(d.err), col("red")))
+    end
+    if d.state == "RELOCATE" and d.step and d.step ~= "" then
+      L[#L + 1] = row(seg(tostring(d.step), col("white")))
+    end
+    if d.state == "MINING" then
+      L[#L + 1] = row(seg(fmt(d.targets) .. " left", col("lime")),
+        type(d.rate) == "number"
+          and seg((" %.1f/s"):format(d.rate), col("white")) or nil,
+        d.eta and seg(" eta " .. tostring(d.eta), col("gray")) or nil)
+    end
+    L[#L + 1] = row(seg("hops " .. fmt(d.hops), col("lightBlue")),
+      seg("  fuel " .. fmt(d.fuel), col("lightBlue")),
+      d.warn and seg("  warn:" .. tostring(d.warn), col("orange")) or nil)
+    local sl = sparkline(ring, w - 1)
+    if sl then L[#L + 1] = row(seg(" " .. sl, col("green"))) end
+    return L
+  end
+end
+
 local RENDERERS = {
   flux = { label = "FLUX", metric = function(d) return d.trueE or d.e end,
     lines = fluxLines },
@@ -212,6 +284,13 @@ local RENDERERS = {
 
 local function rendererFor(name)
   if RENDERERS[name] then return RENDERERS[name] end
+  if name:match("^sled") then
+    return {
+      label = name:upper(),
+      metric = function(d) return d.targets end,
+      lines = sledLines(name:upper()),
+    }
+  end
   return {
     label = name:upper(),
     metric = function(d)
@@ -319,6 +398,7 @@ end
 local function ingest(envelope)
   local name = envelope.source
   if type(name) ~= "string" or type(envelope.data) ~= "table" then return end
+  if not passesFilter(name) then return end
   totalMsgs = totalMsgs + 1
   if name == "alerts" then
     alertMsg = tostring(envelope.data.msg or "alert")
