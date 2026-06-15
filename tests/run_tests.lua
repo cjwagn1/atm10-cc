@@ -429,6 +429,88 @@ T("wall: shows NO SIGNAL when a source goes stale", function()
   expectContains(env:monitorText("monitor_2"), "NO SIGNAL", "monitor")
 end)
 
+T("wall: a flux sensor that can't read shows 'no reading', not '? FE' + stale trail", function()
+  -- the AppFlux-blackout case: the dash computer loses its accessor/block
+  -- reader and broadcasts flux with a nil energy value. The wall must not
+  -- render "? FE" plus a frozen sparkline of pre-blackout history.
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 36, baseH = 18 })
+  -- two healthy readings first (these populate the trend ring)
+  env:rednetAt(1.0, 7, { v = 1, source = "flux", data = {
+    trueE = 10000000000, trueCap = 68719476736, cells = 1, rate = -500 } },
+    "telemetry")
+  env:rednetAt(2.0, 7, { v = 1, source = "flux", data = {
+    trueE = 9000000000, trueCap = 68719476736, cells = 1, rate = -500 } },
+    "telemetry")
+  -- then the sensor loses its source: alive (srcName present) but no energy
+  env:rednetAt(3.0, 7, { v = 1, source = "flux", data = {
+    srcName = "appflux:flux_accessor_0" } }, "telemetry")
+  current = env
+  env:run(WALL, {}, { maxTime = 4 })
+  local m = env:monitorText("monitor_2")
+  expectContains(m, "no reading", "degraded flux card states it plainly")
+  expectNotContains(m, "? FE", "no question-mark energy headline")
+end)
+
+T("dash: an empty flux cell (0 FE, no fe_energy component) reads as 0, not 'no source'", function()
+  -- AppFlux omits the appflux:fe_energy component when a cell is at 0 FE.
+  -- The cell item is still there, so the dash must count it as a 0 reading
+  -- instead of flickering to "(no energy peripheral)" every time the cell
+  -- empties (the in-game flicker the user hit when the base ran dry).
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  env:addFluxDrive("block_reader_0", {
+    cells = { { id = "appflux:fe_64k_cell", energy = nil } }, -- present, empty
+  })
+  current = env
+  env:run("programs/fluxdash.lua", {}, { maxTime = 2.5 })
+  expectContains(env:termText(), "block reader", "still names the reader source")
+  expectNotContains(env:termText(), "no energy peripheral", "no false 'no source'")
+  local last
+  for _, s in ipairs(env.rednetSent) do
+    if s.protocol == "telemetry" and type(s.message) == "table"
+      and s.message.source == "flux" then
+      last = s.message
+    end
+  end
+  if not last then fail("no flux envelope broadcast") end
+  if last.data.trueE ~= 0 then
+    fail("empty cell should read trueE=0, got " .. tostring(last.data.trueE))
+  end
+  if last.data.cells ~= 1 then
+    fail("the empty cell should still be counted, cells=" .. tostring(last.data.cells))
+  end
+end)
+
+T("dash: a failed energy read broadcasts no stale value (nil, not the last good number)", function()
+  -- accessor present but unreadable (chunk/AE down): getEnergy returns nil
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  local energy = 5000000000
+  env:addPeripheral("appflux:flux_accessor_0", { "appflux:flux_accessor", "energy_storage" }, {
+    getEnergy = function() return energy end,
+    getEnergyCapacity = function() return 68719476736 end,
+  })
+  -- after t=2.5s the read starts failing
+  env:scheduleAt(2.5, { fn = function() energy = nil end })
+  current = env
+  env:run("programs/fluxdash.lua", {}, { maxTime = 4 })
+  -- find the last flux envelope broadcast
+  local last
+  for _, s in ipairs(env.rednetSent) do
+    if s.protocol == "telemetry" and type(s.message) == "table"
+      and s.message.source == "flux" then
+      last = s.message
+    end
+  end
+  if not last then fail("no flux envelope broadcast") end
+  if last.data.e ~= nil then
+    fail("broadcast a stale energy value after the read failed: e="
+      .. tostring(last.data.e))
+  end
+end)
+
 T("wall: q quits cleanly", function()
   local env = CC.new{ termW = 51, termH = 19 }
   env:addModem("top")

@@ -184,8 +184,21 @@ end
 local function fluxLines(d, ring, w)
   local e = d.trueE or d.e
   local cap = d.trueE and d.trueCap or d.cap
-  local pct = (e and cap and cap > 0) and (e / cap * 100) or nil
   local L = {}
+  -- The sensor is alive (this card is not stale) but reports no energy
+  -- value — its dash computer lost the flux accessor / block reader (e.g.
+  -- after an AppFlux/AE blackout). Say so plainly instead of "? FE" plus a
+  -- frozen sparkline of pre-blackout history.
+  if type(e) ~= "number" then
+    L[#L + 1] = row(seg("FLUX ", col("yellow")), seg("no reading", col("red")))
+    L[#L + 1] = row(seg(" check the dash computer", col("gray")))
+    if type(d.ae) == "number" and type(d.aeMax) == "number" then
+      L[#L + 1] = row(seg("AE " .. fmt(d.ae) .. "/" .. fmt(d.aeMax),
+        col("lightBlue")))
+    end
+    return L
+  end
+  local pct = (cap and cap > 0) and (e / cap * 100) or nil
   L[#L + 1] = row(seg("FLUX ", col("yellow")),
     seg(fmt(e) .. (cap and "/" .. fmt(cap) or "") .. " FE", col("lime")),
     pct and seg((" %.0f%%"):format(pct), col("white")) or nil)

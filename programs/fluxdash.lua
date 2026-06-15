@@ -149,31 +149,50 @@ local CELL_BYTES = {
   ["16m"] = 16777216, ["64m"] = 67108864, ["256m"] = 268435456,
 }
 
--- "appflux:fe_64k_cell" -> 68,719,476,736 FE; nil for unknown ids
+-- "appflux:fe_64k_cell" -> 68,719,476,736 FE; nil for non-flux-cell ids.
+-- The pattern is deliberately strict (fe_<size>_cell) so it never matches
+-- unrelated items like ae2:item_storage_cell_64k.
 local function cellCapacity(id)
   if type(id) ~= "string" then return nil end
-  local size = id:lower():match("(%d+[km])")
+  local size = id:lower():match("fe_(%d+[km])_cell")
   local bytes = size and CELL_BYTES[size]
   return bytes and bytes * FE_PER_BYTE or nil
 end
 
--- Walk a Block Reader dump summing every appflux fe_energy component,
--- shape-agnostic (works on ae2:drive, extendedae:ex_drive, ME chests...).
--- Tracks the nearest enclosing item id so capacity can be derived.
-local function walkFlux(t, curId, acc, seen)
-  if seen[t] then return end
-  seen[t] = true
-  if type(t.id) == "string" then curId = t.id end
-  for k, v in pairs(t) do
-    if type(v) == "table" then
-      walkFlux(v, curId, acc, seen)
-    elseif type(v) == "number"
-      and tostring(k):lower():find("fe_energy", 1, true) then
-      acc.e = acc.e + v
-      acc.cells = acc.cells + 1
-      local cap = cellCapacity(curId)
-      if cap then acc.cap = acc.cap + cap end
+-- find this item's fe_energy component (any depth, absent => nil)
+local function fluxEnergyOf(item, depth)
+  if type(item) ~= "table" or (depth or 0) > 3 then return nil end
+  for k, v in pairs(item) do
+    if type(v) == "number" and tostring(k):lower():find("fe_energy", 1, true) then
+      return v
     end
+  end
+  for _, v in pairs(item) do
+    if type(v) == "table" then
+      local found = fluxEnergyOf(v, (depth or 0) + 1)
+      if found then return found end
+    end
+  end
+  return nil
+end
+
+-- Walk a Block Reader dump finding every AppFlux flux cell, shape-agnostic
+-- (ae2:drive, extendedae:ex_drive, ME chests...). A cell is identified by
+-- its ITEM ID, not by the presence of an fe_energy component: AppFlux omits
+-- that component when a cell sits at 0 FE, so keying on it would make an
+-- empty cell vanish and collapse the display to "(no energy peripheral)".
+-- An empty cell now reads as a real 0, and the capacity still sums.
+local function walkFlux(t, acc, seen)
+  if type(t) ~= "table" or seen[t] then return end
+  seen[t] = true
+  if type(t.id) == "string" and cellCapacity(t.id) then
+    acc.e = acc.e + (fluxEnergyOf(t) or 0)
+    acc.cells = acc.cells + 1
+    acc.cap = acc.cap + cellCapacity(t.id)
+    return -- counted this cell; don't descend (avoid double counting)
+  end
+  for _, v in pairs(t) do
+    if type(v) == "table" then walkFlux(v, acc, seen) end
   end
 end
 
@@ -271,7 +290,10 @@ local function sample()
     if okE and type(e) == "number" and okC and type(cap) == "number" then
       state.e, state.cap, lost = e, cap, false
     else
+      -- the accessor stopped reading (chunk/AE down, modem unlit): clear
+      -- the last-good value so we never broadcast a frozen stale number
       lost = true
+      state.e, state.cap = nil, nil
     end
   end
 
@@ -280,7 +302,7 @@ local function sample()
   for _, r in ipairs(readers) do
     local ok, data = pcall(r.getBlockData)
     if ok and type(data) == "table" then
-      walkFlux(data, nil, acc, {})
+      walkFlux(data, acc, {})
     end
   end
   if acc.cells > 0 then
@@ -361,11 +383,13 @@ local function renderTarget(t, isTerm)
   c(colors.yellow)
   line("AppliedFlux / ME Energy")
   c(colors.white)
-  if flux then
+  if state.trueE ~= nil then
+    line("Source: block reader (drive data)")
+  elseif flux then
     line("Source: " .. tostring(fluxName)
       .. (lost and " (lost - rescanning)" or ""))
-  elseif state.trueE then
-    line("Source: block reader (drive data)")
+  elseif #readers > 0 then
+    line("Source: block reader (no flux cells)")
   else
     line("Source: (no energy peripheral)")
   end

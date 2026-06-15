@@ -312,6 +312,12 @@ docs/        RESEARCH.md (file:line evidence), SLED-DESIGN.md,
   journal + boot reconciliation, turtle-led commissioning, measured-rate
   telemetry), `sledctl` fleet console, wall sled card + `sources=`
   filter, historian stuck rules (`RELOCATE` 900s / `RECOVER` 30s).
+- **v10** — flux robustness: an empty flux cell (0 FE, whose
+  `appflux:fe_energy` component AppFlux omits) is detected by cell id and
+  reads as a real `0` instead of flickering the dash between "block reader"
+  and "(no energy peripheral)"; a failed accessor read clears the stale
+  value instead of broadcasting it; the wall renders a sensor that can't
+  read its source as "no reading" rather than `? FE` + a frozen sparkline.
 
 ## Roadmap
 
