@@ -23,17 +23,32 @@ local PROTOCOL   = "telemetry"
 local SNAP_EVERY = 10    -- seconds between disk flushes
 local RING_MAX   = 360   -- samples kept per source
 local COOLDOWN   = 300   -- seconds between repeats of the same alert
+local HEARTBEAT  = 1800  -- seconds between "base ok" digest pulses
 
--- key = "energy" means data.trueE or data.e (works for flux sensors).
--- `source` accepts an exact name, "*", or a trailing-* prefix ("sled*").
--- `equals` rules fire when a string field has held one value for
--- forSeconds (the E2 "stuck" extension; a stuck-but-broadcasting sled
--- refreshes lastSeen, so silence rules can never catch it).
+-- Rule types (all keyed on `source`: an exact name, "*", or a trailing-*
+-- prefix like "sled*"):
+--   dropPct/window  - newest sample fell dropPct% below the window's oldest
+--   silentFor       - no envelope for N seconds (sensor offline)
+--   equals/forSeconds - a STRING field held one value for N seconds (stuck)
+--   metric + below/above + forSeconds - a NUMBER metric stayed past a
+--     threshold for N seconds (the "deficit"/"too full" sustained alerts)
+--   runway = "empty"|"full", withinSeconds - the level is PROJECTED to hit
+--     0 (or capacity) within N seconds at its measured rate (lead-time)
+-- `metric` is a computed value, not a raw field: "pct" (energy/capacity),
+-- "usedPct" (ME bytes), "rate", "energy", or any literal data key.
 local ALERTS = {
   { source = "flux", key = "energy", dropPct = 40, window = 300 },
   { source = "*", silentFor = 60 },
   { source = "sled*", key = "state", equals = "RELOCATE", forSeconds = 900 },
   { source = "sled*", key = "state", equals = "RECOVER", forSeconds = 30 },
+  -- power you can't see on the wall: chronic shortage + lead time
+  { source = "flux", metric = "pct", below = 5, forSeconds = 600,
+    label = "flux power low (under 5% for 10m+)" },
+  { source = "flux", runway = "empty", withinSeconds = 600, rateWindow = 30 },
+  -- the silent base-killer: ME storage filling toward a crafting jam
+  { source = "me", metric = "usedPct", above = 90, forSeconds = 60,
+    label = "ME storage over 90% full" },
+  { source = "me", runway = "full", withinSeconds = 1200, rateWindow = 120 },
 }
 
 -- ------------------------------------------------------------- utilities
@@ -102,6 +117,73 @@ local function sourceMatches(pattern, name)
   if pattern == "*" or pattern == name then return true end
   local prefix = pattern:match("^(.*)%*$")
   return prefix ~= nil and name:sub(1, #prefix) == prefix
+end
+
+local function fmtSpan(sec)
+  if sec ~= sec or sec < 0 or sec >= 999 * 86400 then return ">999d" end
+  if sec < 60 then return ("%ds"):format(math.floor(sec)) end
+  if sec < 3600 then return ("%dm"):format(math.floor(sec / 60)) end
+  if sec < 48 * 3600 then
+    return ("%dh %dm"):format(math.floor(sec / 3600),
+      math.floor(sec % 3600 / 60))
+  end
+  return ("%dd %dh"):format(math.floor(sec / 86400),
+    math.floor(sec % 86400 / 3600))
+end
+
+-- A computed metric from a data payload, nil when not derivable. Lets a
+-- rule watch a fraction/derived signal the envelope doesn't carry raw.
+local function metricValue(metric, data)
+  if metric == "pct" then
+    local e = data.trueE or data.e
+    local cap = data.trueE and data.trueCap or data.cap
+    if type(e) == "number" and type(cap) == "number" and cap > 0 then
+      return e / cap * 100
+    end
+    return nil
+  elseif metric == "usedPct" then
+    if type(data.usedBytes) == "number" and type(data.totalBytes) == "number"
+      and data.totalBytes > 0 then
+      return data.usedBytes / data.totalBytes * 100
+    end
+    return nil
+  elseif metric == "energy" then
+    return data.trueE or data.e
+  end
+  return data[metric]
+end
+
+-- (current level, capacity) of whichever family this source is — flux
+-- (energy/cap) or ME (used/total bytes) — for runway projection.
+local function levelOf(data)
+  local e = data.trueE or data.e
+  if type(e) == "number" then
+    return e, (data.trueE and data.trueCap or data.cap)
+  end
+  if type(data.usedBytes) == "number" then
+    return data.usedBytes, data.totalBytes
+  end
+  return nil, nil
+end
+
+-- units/second that levelOf is changing, measured from the ring over the
+-- trailing window (so it works for ME, whose envelope carries no rate)
+local function levelRate(src, window)
+  local now = os.clock()
+  local first, last
+  for _, s in ipairs(src.ring) do
+    if s.t >= now - window then
+      local v = (levelOf(s.d))
+      if v ~= nil then
+        first = first or { t = s.t, v = v }
+        last = { t = s.t, v = v }
+      end
+    end
+  end
+  if first and last and last.t > first.t then
+    return (last.v - first.v) / (last.t - first.t)
+  end
+  return nil
 end
 
 -- ----------------------------------------------------------- peripherals
@@ -260,6 +342,114 @@ local function checkStuckRules()
   end
 end
 
+-- Sustained numeric rules: a computed metric stayed past a threshold for
+-- the trailing forSeconds (the deficit / too-full alerts). Same contiguous
+-- trailing-run logic as checkStuckRules, but numeric.
+local function checkSustainedRules()
+  local now = os.clock()
+  for i, rule in ipairs(ALERTS) do
+    if rule.metric and rule.forSeconds
+      and (rule.below ~= nil or rule.above ~= nil) then
+      for name, src in pairs(sources) do
+        if sourceMatches(rule.source, name) and #src.ring > 0 then
+          local key = i .. ":" .. name
+          if not fired[key] or now - fired[key] >= COOLDOWN then
+            local firstT
+            for k = #src.ring, 1, -1 do
+              local v = metricValue(rule.metric, src.ring[k].d)
+              local hit = v ~= nil
+                and (rule.below == nil or v < rule.below)
+                and (rule.above == nil or v > rule.above)
+              if hit then firstT = src.ring[k].t else break end
+            end
+            if firstT and now - firstT >= rule.forSeconds then
+              fired[key] = now
+              -- labels are self-contained sentences (they name their own
+              -- source); the generic fallback prepends the source name
+              announce(rule.label or (("%s %s %s %s"):format(name,
+                rule.metric, rule.below ~= nil and "below" or "above",
+                tostring(rule.below or rule.above))))
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+-- Runway rules: project time to hit 0 (empty) or capacity (full) at the
+-- measured rate; fire when that lead time drops under withinSeconds.
+local function checkRunwayRules()
+  local now = os.clock()
+  for i, rule in ipairs(ALERTS) do
+    if rule.runway then
+      for name, src in pairs(sources) do
+        if sourceMatches(rule.source, name) and #src.ring > 0 then
+          local key = i .. ":" .. name
+          if not fired[key] or now - fired[key] >= COOLDOWN then
+            local cur, cap = levelOf(src.ring[#src.ring].d)
+            local rate = levelRate(src, rule.rateWindow or 60) -- units/sec
+            local secs
+            if cur and rate then
+              if rule.runway == "empty" and rate < 0 then
+                secs = cur / -rate
+              elseif rule.runway == "full" and rate > 0 and cap and cap > cur then
+                secs = (cap - cur) / rate
+              end
+            end
+            if secs and secs > 0 and secs <= rule.withinSeconds then
+              fired[key] = now
+              announce(("%s %s in ~%s"):format(name,
+                rule.runway == "empty" and "empty" or "full", fmtSpan(secs)))
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+-- A one-line "base ok" digest from the latest sample of each source. Sent
+-- to chat + the bridge as a low-key HEARTBEAT (not a red wall alert), so
+-- the historian visibly proves it's alive and gives a trend pulse the
+-- instantaneous wall can't.
+local function summaryLine()
+  local parts = {}
+  for name, src in pairs(sources) do
+    local last = src.ring[#src.ring]
+    if last then
+      local d = last.d
+      if name == "flux" then
+        local pct = metricValue("pct", d)
+        local s = "flux " .. (pct and ("%.0f%%"):format(pct) or "?")
+        if type(d.rate) == "number" then
+          s = s .. " " .. (d.rate >= 0 and "+" or "") .. fmt(d.rate) .. "/t"
+        end
+        parts[#parts + 1] = s
+      elseif name == "me" then
+        local up = metricValue("usedPct", d)
+        parts[#parts + 1] = "ME " .. (up and ("%.0f%%"):format(up) or "?")
+      else
+        parts[#parts + 1] = name .. " " .. tostring(d.state or "ok")
+      end
+    end
+  end
+  table.sort(parts)
+  if #parts == 0 then return "base: no sensors heard" end
+  return "base: " .. table.concat(parts, ", ")
+end
+
+local function heartbeat()
+  local msg = summaryLine()
+  if chatBox then pcall(chatBox.sendMessage, msg, "base") end
+  wsSend(toJson({ heartbeat = msg, t = os.clock() }))
+  local f = fs.open("telemetry/alerts.log", "a")
+  if f then
+    f.write(("%s [hb] %s\n"):format(exact(os.clock()), msg))
+    f.close()
+  end
+end
+
 -- ------------------------------------------------------------------ disk
 
 local function flush()
@@ -343,6 +533,7 @@ chatBox = findChatBox()
 render()
 local snapTimer = os.startTimer(SNAP_EVERY)
 local tickTimer = os.startTimer(1)
+local lastHeartbeat = os.clock()
 while true do
   local ev = table.pack(os.pullEventRaw())
   if ev[1] == "terminate" or (ev[1] == "char" and ev[2] == "q") then
@@ -357,6 +548,12 @@ while true do
   elseif ev[1] == "timer" and ev[2] == tickTimer then
     checkSilenceRules()
     checkStuckRules()
+    checkSustainedRules()
+    checkRunwayRules()
+    if os.clock() - lastHeartbeat >= HEARTBEAT then
+      lastHeartbeat = os.clock()
+      heartbeat()
+    end
     render()
     tickTimer = os.startTimer(1)
   elseif ev[1] == "peripheral" or ev[1] == "peripheral_detach" then

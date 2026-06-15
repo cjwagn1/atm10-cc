@@ -156,16 +156,29 @@ local ALERTS = {
   { source = "*", silentFor = 60 },
   { source = "sled*", key = "state", equals = "RELOCATE", forSeconds = 900 },
   { source = "sled*", key = "state", equals = "RECOVER", forSeconds = 30 },
+  -- sustained-condition + predictive rules (the useful, recurring ones)
+  { source = "flux", metric = "pct", below = 5, forSeconds = 600,
+    label = "flux power low (under 5% for 10m+)" },
+  { source = "flux", runway = "empty", withinSeconds = 600, rateWindow = 30 },
+  { source = "me", metric = "usedPct", above = 90, forSeconds = 60,
+    label = "ME storage over 90% full" },
+  { source = "me", runway = "full", withinSeconds = 1200, rateWindow = 120 },
 }
 ```
 
-`equals` rules catch a source STUCK in one state (a stuck-but-broadcasting
-sled refreshes its lastSeen, so silence rules can never see it); rule
-sources accept exact names, `*`, or a trailing-`*` prefix.
-
-Drop rules compare the newest sample to the oldest within the window
-("flux energy dropped 45% in 5m (10.00G -> 5.50G)"); silence rules fire
-once per outage; everything has a 5-minute cooldown. On fire, the
+Rule types: **dropPct** (newest vs the window's oldest), **silentFor**
+(sensor offline), **equals/forSeconds** (a string field STUCK on one
+value — a stuck-but-broadcasting sled refreshes lastSeen, so silence
+rules can't see it), **metric+below/above+forSeconds** (a computed number
+— `pct`, `usedPct`, `rate` — held past a threshold: the chronic
+deficit / too-full alerts), and **runway** (the level is *projected* to
+hit 0 or capacity within N seconds at its measured rate — lead time, not a
+post-mortem). Rule sources accept exact names, `*`, or a trailing-`*`
+prefix. Separately, a periodic **heartbeat** posts a `base: flux 71%
++1.20k/t, ME 30%` digest to chat (proves the historian is alive; not a red
+alert). Drop rules compare newest to the window's oldest ("flux energy
+dropped 45% in 5m (10.00G -> 5.50G)"); silence rules fire once per outage;
+everything has a 5-minute cooldown. On fire, the
 historian (1) sends in-game chat via an adjacent Advanced Peripherals
 **Chat Box**, (2) broadcasts the alert as source `alerts` so every wall
 shows the red banner, (3) appends to the alert log, (4) optionally streams
@@ -318,6 +331,12 @@ docs/        RESEARCH.md (file:line evidence), SLED-DESIGN.md,
   and "(no energy peripheral)"; a failed accessor read clears the stale
   value instead of broadcasting it; the wall renders a sensor that can't
   read its source as "no reading" rather than `? FE` + a frozen sparkline.
+- **v11** — useful, recurring historian alerts: sustained-condition rules
+  (flux under 5% for 10m+; ME over 90% full), predictive **runway**
+  warnings ("flux empty in ~6m", "ME full in ~20m" — lead time, not a
+  post-mortem), and a periodic **heartbeat** digest so you can tell it's
+  alive. Built around what the wall *can't* show: trends, projections, and
+  off-site push (via the existing bridge).
 
 ## Roadmap
 

@@ -701,6 +701,114 @@ T("historian: flags a source that goes silent", function()
   if not found then fail("no silence alert in chat log") end
 end)
 
+-- ----------------------------------------- v11: useful, recurring alerts
+
+local function chatHas(env, needle)
+  for _, c in ipairs(env.chatLog) do
+    if c.msg:find(needle, 1, true) then return c.msg end
+  end
+  return nil
+end
+
+T("historian: deficit alert when flux sits under 5% for 10+ minutes", function()
+  -- the chronic-shortage case: flux pinned low (not a one-off drop). A
+  -- constant low level never trips the drop rule, but the deficit rule
+  -- catches "you've been broke for 10 minutes".
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  -- pct = 1e9 / 281.47T ~= 0.0004%, constant, every 30s for >10 min
+  for t = 1, 700, 30 do
+    env:rednetAt(t, 7, { v = 1, source = "flux", tick = 0, data = {
+      trueE = 1000000000, trueCap = 281474976710656, cells = 1, rate = 0 } },
+      "telemetry")
+  end
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 720 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  if not chatHas(env, "low") then
+    fail("no deficit (low-power) alert fired")
+  end
+end)
+
+T("historian: runway alert projects flux empty before it happens", function()
+  -- a gradual drain (under the 40% drop threshold) must still warn that
+  -- it's heading to empty soon, with lead time.
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  -- 10G draining ~0.1G/s: ~10% total drop (no drop alert), but empty in <2m
+  for t = 1, 12 do
+    env:rednetAt(t, 7, { v = 1, source = "flux", tick = 0, data = {
+      trueE = 10000000000 - (t - 1) * 100000000,
+      trueCap = 281474976710656, cells = 1, rate = -5000000 } }, "telemetry")
+  end
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 14 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  local msg = chatHas(env, "empty in")
+  if not msg then fail("no runway 'empty in' alert fired") end
+  expectNotContains(chatHas(env, "dropped") or "", "dropped",
+    "a 10% drain must not trip the 40% drop rule")
+end)
+
+T("historian: ME storage filling warns before drives jam", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  -- drives held at 95% for >1 min
+  for t = 1, 80, 5 do
+    env:rednetAt(t, 8, { v = 1, source = "me", tick = 0, data = {
+      usedBytes = 950000, totalBytes = 1000000, availBytes = 50000,
+      cpus = 4, cpusBusy = 0, aeUse = 50 } }, "telemetry")
+  end
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 90 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  if not chatHas(env, "ME") or not chatHas(env, "full") then
+    fail("no ME-full warning fired")
+  end
+end)
+
+T("historian: ME-full runway projects when storage will fill", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  -- filling 100k bytes/s from 50% toward full: full in a few seconds
+  for t = 1, 6 do
+    env:rednetAt(t, 8, { v = 1, source = "me", tick = 0, data = {
+      usedBytes = 400000 + (t - 1) * 100000, totalBytes = 1000000,
+      cpus = 4, cpusBusy = 0 } }, "telemetry")
+  end
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 8 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  if not chatHas(env, "full in") then
+    fail("no ME-full runway alert fired")
+  end
+end)
+
+T("historian: heartbeat posts a periodic 'base' digest proving it's alive", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  -- healthy base (no alerts): flux ~71%, ME ~30%, every 60s past one heartbeat
+  for t = 1, 1840, 60 do
+    env:rednetAt(t, 7, { v = 1, source = "flux", tick = 0, data = {
+      trueE = 200000000000000, trueCap = 281474976710656, cells = 1, rate = 0 } },
+      "telemetry")
+    env:rednetAt(t + 1, 8, { v = 1, source = "me", tick = 0, data = {
+      usedBytes = 300000, totalBytes = 1000000, cpus = 4, cpusBusy = 0 } },
+      "telemetry")
+  end
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 1850 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  local hb = chatHas(env, "base")
+  if not hb then fail("no heartbeat digest in chat") end
+  expectContains(hb, "flux", "heartbeat mentions flux")
+end)
+
 -- ------------------------------------------------------------------- eta
 
 T("wall: shows time until empty while draining", function()
