@@ -41,9 +41,10 @@ local ALERTS = {
   { source = "*", silentFor = 60 },
   { source = "sled*", key = "state", equals = "RELOCATE", forSeconds = 900 },
   { source = "sled*", key = "state", equals = "RECOVER", forSeconds = 30 },
-  -- power you can't see on the wall: chronic shortage + lead time
-  { source = "flux", metric = "pct", below = 5, forSeconds = 600,
-    label = "flux power low (under 5% for 10m+)" },
+  -- power you can't see on the wall: lead time to empty. (A fill-% "low
+  -- power" rule was removed: on a trillions-capacity Applied Flux Drive any
+  -- realistic charge reads ~0%, so it only ever cried wolf. Time-to-empty
+  -- from the measured rate is the honest "you're about to be broke" signal.)
   { source = "flux", runway = "empty", withinSeconds = 600, rateWindow = 30 },
   -- the silent base-killer: ME storage filling toward a crafting jam
   { source = "me", metric = "usedPct", above = 90, forSeconds = 60,
@@ -78,6 +79,19 @@ local function exact(n)
     return ("%.0f"):format(n)
   end
   return tostring(n)
+end
+
+-- fmt with trailing decimal zeros trimmed, for the human-facing digest:
+-- 550.00G -> 550G, 2.50M -> 2.5M, 2.49M stays 2.49M. (fmt keeps two
+-- decimals everywhere else so alert text stays aligned.)
+local function fmtc(n)
+  local s = fmt(n)
+  local body, unit = s:match("^(%-?[%d.]+)([kMGTP]?)$")
+  if body and body:find(".", 1, true) then
+    body = body:gsub("0+$", ""):gsub("%.$", "")
+    return body .. unit
+  end
+  return s
 end
 
 -- compact one-line serializer (textutils-free, deterministic key order)
@@ -414,29 +428,43 @@ end
 -- the historian visibly proves it's alive and gives a trend pulse the
 -- instantaneous wall can't.
 local function summaryLine()
+  -- { priority, text } so flux leads, ME follows, other sensors trail (and
+  -- sort stably within a tier). The chat box already tags the line [base],
+  -- so the digest doesn't repeat "base:" itself.
   local parts = {}
   for name, src in pairs(sources) do
     local last = src.ring[#src.ring]
     if last then
       local d = last.d
       if name == "flux" then
-        local pct = metricValue("pct", d)
-        local s = "flux " .. (pct and ("%.0f%%"):format(pct) or "?")
+        -- a fill % is meaningless on a trillions-capacity Applied Flux Drive
+        -- (550G reads 0%). Show the absolute stored, the headroom it's
+        -- swimming in (max capacity), and the throughput instead.
+        local e = d.trueE or d.e
+        local cap = d.trueE and d.trueCap or d.cap
+        local s = "flux " .. (e and fmtc(e) or "?")
+        if e and cap then s = s .. " / " .. fmtc(cap) end
         if type(d.rate) == "number" then
-          s = s .. " " .. (d.rate >= 0 and "+" or "") .. fmt(d.rate) .. "/t"
+          s = s .. " " .. (d.rate >= 0 and "+" or "") .. fmtc(d.rate) .. "/t"
         end
-        parts[#parts + 1] = s
+        parts[#parts + 1] = { 1, s }
       elseif name == "me" then
+        -- ME bytes ARE a real ratio (used/total), so the % stays useful
         local up = metricValue("usedPct", d)
-        parts[#parts + 1] = "ME " .. (up and ("%.0f%%"):format(up) or "?")
+        parts[#parts + 1] = { 2, "ME " .. (up and ("%.0f%%"):format(up) or "?") }
       else
-        parts[#parts + 1] = name .. " " .. tostring(d.state or "ok")
+        parts[#parts + 1] = { 3, name .. " " .. tostring(d.state or "ok") }
       end
     end
   end
-  table.sort(parts)
-  if #parts == 0 then return "base: no sensors heard" end
-  return "base: " .. table.concat(parts, ", ")
+  table.sort(parts, function(a, b)
+    if a[1] ~= b[1] then return a[1] < b[1] end
+    return a[2] < b[2]
+  end)
+  if #parts == 0 then return "no sensors heard" end
+  local strs = {}
+  for _, p in ipairs(parts) do strs[#strs + 1] = p[2] end
+  return table.concat(strs, " \194\183 ")
 end
 
 local function heartbeat()

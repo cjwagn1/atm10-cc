@@ -710,25 +710,24 @@ local function chatHas(env, needle)
   return nil
 end
 
-T("historian: deficit alert when flux sits under 5% for 10+ minutes", function()
-  -- the chronic-shortage case: flux pinned low (not a one-off drop). A
-  -- constant low level never trips the drop rule, but the deficit rule
-  -- catches "you've been broke for 10 minutes".
+T("historian: stays quiet on a huge-capacity drive holding plenty (no false low-power)", function()
+  -- the 0%-pathology rig: 550G stored in a 281T Applied Flux Drive is
+  -- 0.0002% -- but it's a mountain of power and it's CHARGING. A pct-based
+  -- "under 5%" rule would cry "flux power low" here forever, so that rule
+  -- is gone; genuine drain is still covered by the runway 'empty in' rule.
   local env = CC.new{ termW = 61, termH = 20 }
   env:addModem("top")
   env:addChatBox("chat_box_0")
-  -- pct = 1e9 / 281.47T ~= 0.0004%, constant, every 30s for >10 min
   for t = 1, 700, 30 do
     env:rednetAt(t, 7, { v = 1, source = "flux", tick = 0, data = {
-      trueE = 1000000000, trueCap = 281474976710656, cells = 1, rate = 0 } },
-      "telemetry")
+      trueE = 550000000000, trueCap = 281474976710656, cells = 8,
+      rate = 2490000 } }, "telemetry")
   end
   current = env
   local res = env:run("programs/historian.lua", {}, { maxTime = 720 })
   if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
-  if not chatHas(env, "low") then
-    fail("no deficit (low-power) alert fired")
-  end
+  local cried = chatHas(env, "low")
+  if cried then fail("false low-power alert fired: " .. cried) end
 end)
 
 T("historian: runway alert projects flux empty before it happens", function()
@@ -804,9 +803,50 @@ T("historian: heartbeat posts a periodic 'base' digest proving it's alive", func
   current = env
   local res = env:run("programs/historian.lua", {}, { maxTime = 1850 })
   if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
-  local hb = chatHas(env, "base")
+  -- the chat box tags the digest with prefix "base"; the message itself no
+  -- longer repeats "base:" (the [base] tag already says it)
+  local hb
+  for _, c in ipairs(env.chatLog) do
+    if c.prefix == "base" and c.msg:find("flux", 1, true) then hb = c.msg end
+  end
   if not hb then fail("no heartbeat digest in chat") end
   expectContains(hb, "flux", "heartbeat mentions flux")
+end)
+
+T("historian: heartbeat shows absolute flux + max capacity, not a dead 0%", function()
+  -- the user's real rig: ~550G stored in a trillions-capacity Applied Flux
+  -- Drive. trueE/trueCap rounds to 0%, which is information-free; the digest
+  -- must instead show the absolute stored, the max capacity (the flex), and
+  -- the rate -- and must NOT repeat the "base" label the chat box already
+  -- tags via its [base] prefix.
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  for t = 1, 1840, 60 do
+    env:rednetAt(t, 7, { v = 1, source = "flux", tick = 0, data = {
+      trueE = 550000000000, trueCap = 281474976710656, cells = 8,
+      rate = 2490000 } }, "telemetry")
+    env:rednetAt(t + 1, 8, { v = 1, source = "me", tick = 0, data = {
+      usedBytes = 500000, totalBytes = 1000000, cpus = 4, cpusBusy = 0 } },
+      "telemetry")
+  end
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 1850 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  -- the digest is the only "base"-tagged line carrying BOTH sources; a
+  -- "flux power low" alert (also prefix "base") carries only flux
+  local hb
+  for _, c in ipairs(env.chatLog) do
+    if c.prefix == "base" and c.msg:find("flux", 1, true)
+      and c.msg:find("ME", 1, true) then hb = c.msg end
+  end
+  if not hb then fail("no base heartbeat digest in chat") end
+  expectContains(hb, "550G", "absolute stored, not a 0% ratio")
+  expectContains(hb, "281.47T", "max capacity shown (the flex)")
+  expectContains(hb, "+2.49M", "rate alongside the stored/capacity")
+  expectContains(hb, "ME 50%", "ME ratio kept (it is meaningful)")
+  expectNotContains(hb, "flux 0%", "the dead 0% flux ratio is gone")
+  expectNotContains(hb, "base:", "no repeated 'base:' label")
 end)
 
 -- ------------------------------------------------------------------- eta
