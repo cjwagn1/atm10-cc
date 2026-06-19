@@ -378,6 +378,14 @@ function Env:keyAt(seconds, code)
   self:scheduleAt(seconds, { ev = { "key", code, false } })
 end
 
+-- AP Chat Box "chat" event: a player typed in game. Params mirror Advanced
+-- Peripherals: event, username, message, uuid, isHidden.
+function Env:chatAt(seconds, username, message)
+  self:scheduleAt(seconds, { ev = {
+    "chat", username, message,
+    "00000000-0000-0000-0000-000000000000", false } })
+end
+
 function Env:terminateAt(seconds)
   self:scheduleAt(seconds, { ev = { "terminate" } })
 end

@@ -38,6 +38,29 @@ local function findChatBox()
   end
 end
 
+-- best-effort: which manifest version are we about to pull? Purely for the
+-- chat/console confirmation - each box re-fetches the same manifest itself.
+local function targetVersion()
+  if not http then return nil end
+  local f = fs.open(".fluxdeploy", "r")
+  if not f then return nil end
+  f.readLine()                 -- role (unused here)
+  local url = f.readLine()
+  f.close()
+  if not url then return nil end
+  local bust = url .. (url:find("?", 1, true) and "&" or "?")
+    .. "cb=" .. tostring(os.epoch and os.epoch("utc") or os.clock())
+  local h = http.get(bust)
+  if not h then return nil end
+  local body = h.readAll()
+  h.close()
+  local chunk = load(body, "=manifest", "t", {})
+  if not chunk then return nil end
+  local ok, m = pcall(chunk)
+  if ok and type(m) == "table" then return m.version end
+  return nil
+end
+
 if not openModems() then
   print("No modem found - attach a wireless or ender")
   print("modem so this computer can reach the base mesh.")
@@ -45,17 +68,20 @@ if not openModems() then
 end
 
 local chatBox = findChatBox()
+local ver     = targetVersion()
+local vtag    = ver and ("v" .. tostring(ver)) or "the latest version"
+
 if chatBox then
-  pcall(chatBox.sendMessage, "base updating to the latest version", "base")
+  pcall(chatBox.sendMessage, "base updating to " .. vtag .. "...", "base")
 end
 
-print("Broadcasting update to the base...")
+print("Broadcasting update to the base (" .. vtag .. ")...")
 rednet.broadcast({ cmd = "update", token = CTL_TOKEN }, CTL_PROTOCOL)
 
 -- gather acks for a rough "who heard us" tally. Best-effort: every box
 -- updates whether or not its ack lands inside the window, so a missing name
 -- means "ack was slow", not necessarily "didn't update" - check it if unsure.
-local seen, n = {}, 0
+local seen, order = {}, {}
 local deadline = os.clock() + ACK_WINDOW
 while true do
   local left = deadline - os.clock()
@@ -69,13 +95,25 @@ while true do
     local who = ev[3].label or ("id " .. tostring(ev[3].id))
     if not seen[who] then
       seen[who] = true
-      n = n + 1
+      order[#order + 1] = who
       print("  ack  " .. who)
     end
   end
 end
 
-print(("%d responded in %ds. Updating self..."):format(n, ACK_WINDOW))
+-- one consolidated line to console AND chat, so you can confirm from either
+-- which version is going out and which computers answered
+local summary
+if #order > 0 then
+  summary = ("%s: %d updating - %s"):format(
+    vtag, #order, table.concat(order, ", "))
+else
+  summary = vtag .. ": broadcast sent (no acks in " .. ACK_WINDOW .. "s)"
+end
+print(summary)
+print("Updating self...")
+if chatBox then pcall(chatBox.sendMessage, summary, "base") end
+
 -- hand the terminal back in case a display had it redirected to a monitor
 pcall(function() term.redirect(term.native()) end)
 if shell and shell.run then

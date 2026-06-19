@@ -974,6 +974,45 @@ T("historian: 'u' launches update-all to push to the whole base", function()
   if env:file("pushed.flag") ~= "yes" then fail("update-all did not run") end
 end)
 
+T("historian: typing 'update-all' in chat launches the base update", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  env.files["update-all"] = [[
+    local f = fs.open("pushed.flag", "w")
+    f.write("yes")
+    f.close()
+    os.reboot()
+  ]]
+  env:chatAt(1.5, "Steve", "update-all")  -- a player types the trigger
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 6 })
+  if res.reason ~= "shutdown" or not res.reboot then
+    fail("chat trigger did not launch update-all, got " .. tostring(res.reason))
+  end
+  if env:file("pushed.flag") ~= "yes" then fail("update-all did not run") end
+end)
+
+T("update-all: posts the target version and ack tally to chat", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  env.files[".fluxdeploy"] = "historian\nhttps://example.test/manifest.lua\n"
+  env:addHttp("https://example.test/manifest.lua",
+    "return { version = 13, files = {} }")
+  env.files["update"] = FAKE_UPDATER
+  env:rednetAt(0.5, 7, { ack = true, label = "wall1" }, "basectl")
+  current = env
+  env:run(UPDATEALL, {}, { maxTime = 7 })
+  local sawVer, sawAck
+  for _, c in ipairs(env.chatLog) do
+    if c.msg:find("v13", 1, true) then sawVer = c.msg end
+    if c.msg:find("wall1", 1, true) then sawAck = c.msg end
+  end
+  if not sawVer then fail("target version not announced in chat") end
+  if not sawAck then fail("ack tally not posted to chat") end
+end)
+
 -- ------------------------------------------------------------------- eta
 
 T("wall: shows time until empty while draining", function()

@@ -566,6 +566,8 @@ chatBox = findChatBox()
 -- deliberately untouched by this.
 local CTL_PROTOCOL = "basectl"
 local CTL_TOKEN    = "flux"  -- courtesy lock, not cryptography
+local CHAT_OWNER   = nil     -- set to "YourName" to only accept the chat
+                             -- trigger from you; nil = any player may type it
 
 local function handleCtl(msg)
   if type(msg) ~= "table" or msg.cmd ~= "update" or msg.token ~= CTL_TOKEN then
@@ -587,6 +589,12 @@ while true do
     break
   elseif ev[1] == "char" and ev[2] == "u" then
     -- push the latest version to the whole base, then update self
+    pcall(function() term.redirect(term.native()) end)
+    if shell and shell.run then shell.run("update-all") end
+  elseif ev[1] == "chat" and type(ev[3]) == "string"
+    and ev[3]:lower():gsub("[%s%-]", "") == "updateall"
+    and (not CHAT_OWNER or ev[2] == CHAT_OWNER) then
+    -- a player typed "update-all" (or "update all") in chat: same push
     pcall(function() term.redirect(term.native()) end)
     if shell and shell.run then shell.run("update-all") end
   elseif ev[1] == "rednet_message" and ev[4] == CTL_PROTOCOL
