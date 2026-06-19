@@ -11,11 +11,12 @@ Right-click a button to fire a base-wide command:
   UPDATE SLEDS  push `update` to the sled fleet (needs the sled token in
                 sledctl.conf on this computer)
 
-This is a controller: it sends commands and answers version censuses (so it
-shows up in roll-calls), but it deliberately IGNORES `update` pushes itself -
-a panel that reboots mid-tap is bad. Update it by hand with `update` on the
-rare occasion its own code changes. Its pushes are quiet (no chat); type
-"update-all" in chat for the narrated version. Sleds keep their own channel.
+This is a controller, but it stays in version-sync: it answers version
+censuses and AUTO-UPDATES with the base. A broadcast never loops back to its
+sender, so tapping this panel's own UPDATE ALL never reboots it - only an
+update-all fired from elsewhere (chat / [u]) does, when you're not at the
+panel. Its own pushes are quiet (no chat); type "update-all" in chat for the
+narrated version. Sleds keep their own channel.
 ]]
 
 local CTL_PROTOCOL  = "basectl"
@@ -236,11 +237,17 @@ local function hit(x, y)
   end
 end
 
--- answer version censuses so the console appears in roll-calls; ignore
--- `update` pushes (the console is the controller, updated by hand)
+-- answer version censuses, and auto-update with the base. A broadcast never
+-- loops back to its sender, so tapping our OWN UPDATE ALL never reboots us -
+-- only an update-all fired from elsewhere (chat / [u]) does, when you're not
+-- standing at this panel anyway. So the console stays in version-sync.
 local function handleCtl(msg)
   if type(msg) ~= "table" or msg.token ~= CTL_TOKEN then return end
-  if msg.cmd == "version?" then
+  if msg.cmd == "update" then
+    pcall(rednet.broadcast, { ack = true, id = os.getComputerID(),
+      label = os.getComputerLabel() }, CTL_PROTOCOL)
+    if shell and shell.run then shell.run("update") end
+  elseif msg.cmd == "version?" then
     pcall(rednet.broadcast, { version = myVersion(), id = os.getComputerID(),
       label = os.getComputerLabel() }, CTL_PROTOCOL)
   end

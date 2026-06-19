@@ -1358,6 +1358,20 @@ T("console: tapping VERSIONS censuses and shows the roll-call on the monitor", f
   expectContains(env.snapshots.roll or "", "wall1", "roll-call on monitor")
 end)
 
+T("console: auto-updates when update-all is pushed from elsewhere", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_0", { w = 36, h = 18 })
+  env.files["update"] = FAKE_UPDATER
+  env:rednetAt(1.0, 9, { cmd = "update", token = "flux" }, "basectl")
+  current = env
+  local res = env:run(CONSOLE, {}, { maxTime = 5 })
+  if res.reason ~= "shutdown" or not res.reboot then
+    fail("console did not self-update on a base push, got " .. tostring(res.reason))
+  end
+  if env:file("updated.flag") ~= "yes" then fail("updater did not run") end
+end)
+
 T("console: tapping UPDATE SLEDS broadcasts a sled update when a token is set", function()
   local env = CC.new{ termW = 51, termH = 19 }
   env:addModem("top")
