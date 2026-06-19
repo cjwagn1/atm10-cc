@@ -107,8 +107,8 @@ while true do
     if not seen[who] then
       seen[who] = true
       order[#order + 1] = who
-      print("  ack  " .. who)
-      if chatBox then pcall(chatBox.sendMessage, "ack " .. who, "base") end
+      print("  ack  " .. who)  -- console only; chat acks come from the
+                               -- historian's reliable post-reboot census
     end
   end
 end

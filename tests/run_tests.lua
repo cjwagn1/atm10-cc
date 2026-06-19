@@ -1028,27 +1028,27 @@ T("historian: a non-owner's 'update-all' chat message is ignored", function()
   end
 end)
 
-T("historian: a post-update (update-all) boot announces its version and censuses the base", function()
+T("historian: a post-update (update-all) boot acks each computer on its own chat line", function()
   local env = CC.new{ termW = 61, termH = 20 }
   env:addModem("top")
   env:addChatBox("chat_box_0")
   env.files[".fluxupdated"] = "16\n"   -- left by `update fromall`
-  -- another box answers the startup census ping
+  env.files[".fluxversion"] = "16\n"   -- the historian's own version (self-ack)
+  -- another box answers the census ping
   env:rednetAt(0.8, 7, { version = "16", label = "wall1" }, "basectl")
-  env:charAt(4.5, "q")
+  env:charAt(6.0, "q")
   current = env
-  env:run("programs/historian.lua", {}, { maxTime = 7 })
-  local backOnline, header, rollCall
+  env:run("programs/historian.lua", {}, { maxTime = 9 })
+  local ackWall, ackSelf
   for _, c in ipairs(env.chatLog) do
-    if c.msg:find("back online", 1, true) and c.msg:find("v16", 1, true) then
-      backOnline = c.msg
+    if c.msg:lower():find("ack", 1, true) and c.msg:find("wall1 v16", 1, true) then
+      ackWall = true
     end
-    if c.msg:find("roll-call", 1, true) then header = c.msg end
-    if c.msg:find("wall1 v16", 1, true) then rollCall = c.msg end  -- own line
+    if c.msg:lower():find("ack", 1, true) and c.msg:find("v16", 1, true)
+      and not c.msg:find("wall1", 1, true) then ackSelf = true end  -- historian
   end
-  if not backOnline then fail("no post-update version announce") end
-  if not header then fail("no roll-call header in chat") end
-  if not rollCall then fail("wall1's version not on its own chat line") end
+  if not ackWall then fail("wall1 not acked on its own chat line") end
+  if not ackSelf then fail("historian did not ack itself") end
   if env:file(".fluxupdated") ~= nil then fail("breadcrumb not cleared") end
 end)
 
@@ -1086,7 +1086,7 @@ T("fluxwall: replies to a version-census ping with its running version", functio
   end
 end)
 
-T("update-all chat: posts the version and a per-computer ack line to chat", function()
+T("update-all chat (loud): announces the target version in chat", function()
   local env = CC.new{ termW = 61, termH = 20 }
   env:addModem("top")
   env:addChatBox("chat_box_0")
@@ -1094,18 +1094,14 @@ T("update-all chat: posts the version and a per-computer ack line to chat", func
   env:addHttp("https://example.test/manifest.lua",
     "return { version = 13, files = {} }")
   env.files["update"] = FAKE_UPDATER
-  env:rednetAt(0.5, 7, { ack = true, label = "wall1" }, "basectl")
   current = env
   env:run(UPDATEALL, { "chat" }, { maxTime = 7 })  -- "chat" = loud mode
-  local sawVer, sawAck
+  local sawVer
   for _, c in ipairs(env.chatLog) do
     if c.msg:find("v13", 1, true) then sawVer = c.msg end
-    if c.msg:find("wall1", 1, true) and c.msg:lower():find("ack", 1, true) then
-      sawAck = c.msg
-    end
   end
   if not sawVer then fail("target version not announced in chat") end
-  if not sawAck then fail("per-computer ack line not posted to chat") end
+  -- per-computer acks come from the historian's post-reboot census, not here
 end)
 
 T("update-all (no arg / quiet): updates the base but posts nothing to chat", function()
@@ -1121,22 +1117,19 @@ T("update-all (no arg / quiet): updates the base but posts nothing to chat", fun
   end
 end)
 
-T("historian: a chat-typed 'update-all' is loud (acks reach chat)", function()
+T("historian: a chat-typed 'update-all' is loud (narrates to chat)", function()
   local env = CC.new{ termW = 61, termH = 20 }
   env:addModem("top")
   env:addChatBox("chat_box_0")
   env.files["update"] = FAKE_UPDATER  -- update-all's self-update reboots out
   env:chatAt(1.0, "cjwagn1", "update-all")
-  env:rednetAt(1.4, 7, { ack = true, label = "wall1" }, "basectl")
   current = env
   env:run("programs/historian.lua", {}, { maxTime = 9 })
-  local sawAck
+  local narrated
   for _, c in ipairs(env.chatLog) do
-    if c.msg:find("wall1", 1, true) and c.msg:lower():find("ack", 1, true) then
-      sawAck = true
-    end
+    if c.msg:lower():find("updating", 1, true) then narrated = true end
   end
-  if not sawAck then fail("chat-typed update-all did not log acks to chat") end
+  if not narrated then fail("chat-typed update-all did not narrate to chat") end
 end)
 
 T("historian: pressing [u] is quiet (updates base, no chat spam)", function()

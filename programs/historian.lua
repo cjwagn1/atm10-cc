@@ -606,6 +606,14 @@ local function runCensus()
   -- re-ping every second: the flux computer (heavy block-reader reads) can
   -- miss a single ping, so give every box several chances to answer
   local seen, order = {}, {}
+  do  -- include ourselves; we never hear our own ping
+    local lbl = os.getComputerLabel() or "historian"
+    local vf = fs.open(".fluxversion", "r")
+    local v = vf and ((vf.readLine() or "?"):gsub("%s+", "")) or "?"
+    if vf then vf.close() end
+    seen[lbl] = true
+    order[#order + 1] = lbl .. " v" .. v
+  end
   local deadline = os.clock() + CENSUS_WINDOW
   local nextPing = 0
   while true do
@@ -628,14 +636,13 @@ local function runCensus()
       end
     end
   end
-  -- one chat line per computer (reliable, post-reboot) - the per-box
-  -- confirmation, not the flaky live ack window
-  if #order > 0 then
-    table.sort(order)
-    pcall(chatBox.sendMessage, ("roll-call (%d) -"):format(#order), "base")
-    for _, line in ipairs(order) do
-      pcall(chatBox.sendMessage, "  " .. line, "base")
-    end
+  -- ack each computer on its own line. Space the sends out: a tight loop
+  -- fires them all in one tick and Minecraft's chat throttle drops most -
+  -- the bug behind "only two responded". The beat also looks good rolling in.
+  table.sort(order)
+  for _, line in ipairs(order) do
+    pcall(chatBox.sendMessage, "ack " .. line, "base")
+    sleep(0.3)
   end
 end
 
@@ -648,10 +655,8 @@ do
     local v = (f.readLine() or ""):gsub("%s+", "")
     f.close()
     fs.delete(".fluxupdated")
-    if chatBox and v ~= "" then
-      pcall(chatBox.sendMessage, "historian back online - running v" .. v, "base")
-      runCensus()
-    end
+    -- the census acks every computer (including us), so no separate line
+    if chatBox and v ~= "" then runCensus() end
   end
 end
 
