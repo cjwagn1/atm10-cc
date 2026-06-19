@@ -1325,7 +1325,6 @@ T("console: tapping UPDATE ALL broadcasts the base update", function()
   env:addModem("top")
   env:addMonitor("monitor_0", { w = 36, h = 18 })
   env:touchAt(1.5, "monitor_0", 10, 3)  -- inside the UPDATE ALL button
-  env:charAt(3.0, "q")
   current = env
   env:run(CONSOLE, {}, { maxTime = 5 })
   local sent
@@ -1335,6 +1334,18 @@ T("console: tapping UPDATE ALL broadcasts the base update", function()
   end
   if not sent then fail("UPDATE ALL did not broadcast a base update") end
   if sent.message.token ~= "flux" then fail("token = " .. tostring(sent.message.token)) end
+end)
+
+T("console: UPDATE ALL shows each ack live on the panel", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_0", { w = 36, h = 18 })
+  env:touchAt(1.5, "monitor_0", 10, 3)   -- UPDATE ALL
+  env:rednetAt(1.8, 7, { ack = true, label = "wall1" }, "basectl")
+  env:monitorSnapshotAt(3.0, "acks", "monitor_0")  -- during the ack window
+  current = env
+  env:run(CONSOLE, {}, { maxTime = 6 })
+  expectContains(env.snapshots.acks or "", "ack wall1", "ack shown on the panel")
 end)
 
 T("console: tapping VERSIONS censuses and shows the roll-call on the monitor", function()
@@ -1377,7 +1388,7 @@ T("console: tapping UPDATE SLEDS broadcasts a sled update when a token is set", 
   env:addModem("top")
   env:addMonitor("monitor_0", { w = 36, h = 18 })
   env.files["sledctl.conf"] = 'return { token = "hunter2" }'
-  env:touchAt(1.5, "monitor_0", 10, 9)   -- inside the UPDATE SLEDS button
+  env:touchAt(1.5, "monitor_0", 10, 12)  -- inside the UPDATE SLEDS button
   env:charAt(3.0, "q")
   current = env
   env:run(CONSOLE, {}, { maxTime = 5 })
