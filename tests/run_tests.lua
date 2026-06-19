@@ -1231,6 +1231,79 @@ T("update: always records .fluxversion; only flags .fluxupdated for an update-al
   end
 end)
 
+-- ----------------------------------------- touch command console (v17)
+
+local CONSOLE = "programs/console.lua"
+
+T("console: draws the command buttons on the touch monitor", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_0", { w = 36, h = 18 })
+  env:monitorSnapshotAt(1.0, "panel", "monitor_0")  -- capture before exit clears it
+  env:charAt(2.0, "q")
+  current = env
+  local res = env:run(CONSOLE, {}, { maxTime = 4 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  local m = env.snapshots.panel or ""
+  expectContains(m, "UPDATE ALL", "monitor")
+  expectContains(m, "VERSIONS", "monitor")
+  expectContains(m, "UPDATE SLEDS", "monitor")
+end)
+
+T("console: tapping UPDATE ALL broadcasts the base update", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_0", { w = 36, h = 18 })
+  env:touchAt(1.5, "monitor_0", 10, 3)  -- inside the UPDATE ALL button
+  env:charAt(3.0, "q")
+  current = env
+  env:run(CONSOLE, {}, { maxTime = 5 })
+  local sent
+  for _, s in ipairs(env.rednetSent) do
+    if s.protocol == "basectl" and type(s.message) == "table"
+      and s.message.cmd == "update" then sent = s end
+  end
+  if not sent then fail("UPDATE ALL did not broadcast a base update") end
+  if sent.message.token ~= "flux" then fail("token = " .. tostring(sent.message.token)) end
+end)
+
+T("console: tapping VERSIONS censuses and shows the roll-call on the monitor", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_0", { w = 36, h = 18 })
+  env:touchAt(1.5, "monitor_0", 10, 7)   -- inside the VERSIONS button
+  env:rednetAt(1.7, 7, { version = "16", label = "wall1" }, "basectl")
+  env:monitorSnapshotAt(5.0, "roll", "monitor_0")  -- after the ~3s census, before exit
+  env:charAt(6.0, "q")
+  current = env
+  env:run(CONSOLE, {}, { maxTime = 8 })
+  local pinged
+  for _, s in ipairs(env.rednetSent) do
+    if s.protocol == "basectl" and type(s.message) == "table"
+      and s.message.cmd == "version?" then pinged = true end
+  end
+  if not pinged then fail("VERSIONS did not ping for a census") end
+  expectContains(env.snapshots.roll or "", "wall1", "roll-call on monitor")
+end)
+
+T("console: tapping UPDATE SLEDS broadcasts a sled update when a token is set", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_0", { w = 36, h = 18 })
+  env.files["sledctl.conf"] = 'return { token = "hunter2" }'
+  env:touchAt(1.5, "monitor_0", 10, 11)  -- inside the UPDATE SLEDS button
+  env:charAt(3.0, "q")
+  current = env
+  env:run(CONSOLE, {}, { maxTime = 5 })
+  local sent
+  for _, s in ipairs(env.rednetSent) do
+    if s.protocol == "sledctl" and type(s.message) == "table"
+      and s.message.cmd == "update" then sent = s end
+  end
+  if not sent then fail("UPDATE SLEDS did not broadcast on sledctl") end
+  if sent.message.token ~= "hunter2" then fail("sled token = " .. tostring(sent.message.token)) end
+end)
+
 -- ----------------------------------------------------------------- runner
 
 local passed = 0

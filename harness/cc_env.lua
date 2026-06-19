@@ -386,6 +386,12 @@ function Env:chatAt(seconds, username, message)
     "00000000-0000-0000-0000-000000000000", false } })
 end
 
+-- Advanced Monitor "monitor_touch" event: a player right-clicked the screen.
+-- Params mirror CC: event, monitor name, x, y (character cells).
+function Env:touchAt(seconds, name, x, y)
+  self:scheduleAt(seconds, { ev = { "monitor_touch", name, x, y } })
+end
+
 function Env:terminateAt(seconds)
   self:scheduleAt(seconds, { ev = { "terminate" } })
 end

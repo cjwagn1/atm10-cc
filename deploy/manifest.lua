@@ -3,7 +3,7 @@
 -- listed below. Bump `version` whenever programs change; in-game
 -- computers pick it up with a single `update`.
 return {
-  version = 16,
+  version = 17,
   files = {
     { path = "sled",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/sled.lua" },
@@ -23,6 +23,8 @@ return {
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/update.lua" },
     { path = "update-all",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/update-all.lua" },
+    { path = "console",
+      url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/console.lua" },
     { path = "installer",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua" },
   },
@@ -33,5 +35,6 @@ return {
     historian = "historian",
     sled = "sled",
     sledctl = "sledctl",
+    console = "console",
   },
 }
