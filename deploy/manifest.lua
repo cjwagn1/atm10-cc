@@ -3,7 +3,7 @@
 -- listed below. Bump `version` whenever programs change; in-game
 -- computers pick it up with a single `update`.
 return {
-  version = 19,
+  version = 20,
   files = {
     { path = "sled",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/sled.lua" },

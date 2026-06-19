@@ -1038,15 +1038,17 @@ T("historian: a post-update (update-all) boot announces its version and censuses
   env:charAt(4.5, "q")
   current = env
   env:run("programs/historian.lua", {}, { maxTime = 7 })
-  local backOnline, rollCall
+  local backOnline, header, rollCall
   for _, c in ipairs(env.chatLog) do
     if c.msg:find("back online", 1, true) and c.msg:find("v16", 1, true) then
       backOnline = c.msg
     end
-    if c.msg:find("wall1 v16", 1, true) then rollCall = c.msg end
+    if c.msg:find("roll-call", 1, true) then header = c.msg end
+    if c.msg:find("wall1 v16", 1, true) then rollCall = c.msg end  -- own line
   end
   if not backOnline then fail("no post-update version announce") end
-  if not rollCall then fail("census roll-call (wall1 v16) not relayed to chat") end
+  if not header then fail("no roll-call header in chat") end
+  if not rollCall then fail("wall1's version not on its own chat line") end
   if env:file(".fluxupdated") ~= nil then fail("breadcrumb not cleared") end
 end)
 
@@ -1352,12 +1354,14 @@ T("console: tapping VERSIONS censuses and shows the roll-call on the monitor", f
   env:charAt(6.0, "q")
   current = env
   env:run(CONSOLE, {}, { maxTime = 8 })
-  local pinged
+  local pings = 0
   for _, s in ipairs(env.rednetSent) do
     if s.protocol == "basectl" and type(s.message) == "table"
-      and s.message.cmd == "version?" then pinged = true end
+      and s.message.cmd == "version?" then pings = pings + 1 end
   end
-  if not pinged then fail("VERSIONS did not ping for a census") end
+  -- must re-ping (not a one-shot) so a busy box like the flux computer is
+  -- caught instead of dropped
+  if pings < 2 then fail("census did not re-ping (got " .. pings .. ")") end
   expectContains(env.snapshots.roll or "", "wall1", "roll-call on monitor")
 end)
 

@@ -124,7 +124,9 @@ else
 end
 print(summary)
 print("Updating self...")
-if chatBox then pcall(chatBox.sendMessage, summary, "base") end
+-- NOTE: the summary stays on the console only. The reliable per-computer
+-- confirmation in chat is the historian's post-reboot roll-call (one line
+-- each); the "ack X" lines above are best-effort live feedback.
 
 -- hand the terminal back in case a display had it redirected to a monitor
 pcall(function() term.redirect(term.native()) end)

@@ -152,21 +152,25 @@ local function draw()
 end
 
 -- census: returns { { label = , version = }, ... } including ourselves,
--- sorted by label (we never hear our own ping, so we add ourselves)
+-- sorted by label. We re-ping every second across the window: the flux
+-- computer does heavy block-reader reads and can miss a single ping, so a
+-- one-shot drops it. Several pings give every box a chance to answer.
 local function census()
-  rednet.broadcast({ cmd = "version?", token = CTL_TOKEN }, CTL_PROTOCOL)
   local label = os.getComputerLabel() or "console"
   local list = { { label = label, version = myVersion() } }
   local seen = { [label] = true }
   local deadline = os.clock() + CENSUS_WINDOW
+  local nextPing = 0
   while true do
-    local left = deadline - os.clock()
-    if left <= 0 then break end
-    local timer = os.startTimer(left)
+    local now = os.clock()
+    if now >= deadline then break end
+    if now >= nextPing then
+      pcall(rednet.broadcast, { cmd = "version?", token = CTL_TOKEN }, CTL_PROTOCOL)
+      nextPing = now + 1
+    end
+    local timer = os.startTimer(math.min(1, deadline - now))
     local ev = table.pack(os.pullEventRaw())
     if ev[1] == "terminate" then
-      break
-    elseif ev[1] == "timer" and ev[2] == timer then
       break
     elseif ev[1] == "rednet_message" and ev[4] == CTL_PROTOCOL
       and type(ev[3]) == "table" and ev[3].version ~= nil then
@@ -176,6 +180,7 @@ local function census()
         list[#list + 1] = { label = who, version = tostring(ev[3].version) }
       end
     end
+    -- timer events just wake us to re-ping / re-check the deadline
   end
   table.sort(list, function(a, b) return a.label < b.label end)
   return list

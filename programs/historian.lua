@@ -603,22 +603,21 @@ end
 -- confirm each box actually came back on the new version.
 local function runCensus()
   if not chatBox then return end
-  local function ping()
-    pcall(rednet.broadcast, { cmd = "version?", token = CTL_TOKEN }, CTL_PROTOCOL)
-  end
-  ping()
+  -- re-ping every second: the flux computer (heavy block-reader reads) can
+  -- miss a single ping, so give every box several chances to answer
   local seen, order = {}, {}
   local deadline = os.clock() + CENSUS_WINDOW
-  local repinged = false
+  local nextPing = 0
   while true do
-    local left = deadline - os.clock()
-    if left <= 0 then break end
-    if not repinged and left <= CENSUS_WINDOW / 2 then ping(); repinged = true end
-    local timer = os.startTimer(left)
+    local now = os.clock()
+    if now >= deadline then break end
+    if now >= nextPing then
+      pcall(rednet.broadcast, { cmd = "version?", token = CTL_TOKEN }, CTL_PROTOCOL)
+      nextPing = now + 1
+    end
+    local timer = os.startTimer(math.min(1, deadline - now))
     local ev = table.pack(os.pullEventRaw())
     if ev[1] == "terminate" then
-      break
-    elseif ev[1] == "timer" and ev[2] == timer then
       break
     elseif ev[1] == "rednet_message" and ev[4] == CTL_PROTOCOL
       and type(ev[3]) == "table" and ev[3].version ~= nil then
@@ -629,9 +628,14 @@ local function runCensus()
       end
     end
   end
+  -- one chat line per computer (reliable, post-reboot) - the per-box
+  -- confirmation, not the flaky live ack window
   if #order > 0 then
     table.sort(order)
-    pcall(chatBox.sendMessage, "base versions - " .. table.concat(order, ", "), "base")
+    pcall(chatBox.sendMessage, ("roll-call (%d) -"):format(#order), "base")
+    for _, line in ipairs(order) do
+      pcall(chatBox.sendMessage, "  " .. line, "base")
+    end
   end
 end
 
