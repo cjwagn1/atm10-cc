@@ -3,6 +3,11 @@ update.lua - refresh every installed flux program from the deploy manifest
 recorded by installer.lua, then reboot into the new version.
 ]]
 
+-- `update fromall` is how update-all (and a box answering its push) invokes
+-- us; a human typing `update` passes nothing. Only the fromall path leaves
+-- the chat-announce breadcrumb, so manual updates stay silent.
+local fromAll = (select(1, ...) == "fromall")
+
 local f = fs.open(".fluxdeploy", "r")
 if not f then
   print("Not installed - run the installer first.")
@@ -61,14 +66,23 @@ if startupProg then
   out.close()
 end
 
--- leave a one-shot breadcrumb so the role program can confirm the new
--- version in chat on the boot that follows (the historian reads + clears it)
-local stamp = fs.open(".fluxupdated", "w")
-if stamp then
-  stamp.write(tostring(manifest.version))
-  stamp.close()
+-- always record the running version (persistent) so any box can answer a
+-- version census; only the fromall path leaves the one-shot .fluxupdated
+-- breadcrumb that makes the historian announce + census in chat on reboot
+local ver = tostring(manifest.version)
+local vf = fs.open(".fluxversion", "w")
+if vf then
+  vf.write(ver)
+  vf.close()
+end
+if fromAll then
+  local stamp = fs.open(".fluxupdated", "w")
+  if stamp then
+    stamp.write(ver)
+    stamp.close()
+  end
 end
 
-print(("Now at v%s. Rebooting..."):format(tostring(manifest.version)))
+print(("Now at v%s. Rebooting..."):format(ver))
 sleep(1)
 os.reboot()

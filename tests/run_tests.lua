@@ -1009,21 +1009,59 @@ T("historian: a non-owner's 'update-all' chat message is ignored", function()
   end
 end)
 
-T("historian: announces its version in chat once after a post-update reboot", function()
+T("historian: a post-update (update-all) boot announces its version and censuses the base", function()
   local env = CC.new{ termW = 61, termH = 20 }
   env:addModem("top")
   env:addChatBox("chat_box_0")
-  env.files[".fluxupdated"] = "14\n"  -- left by update.lua just before reboot
+  env.files[".fluxupdated"] = "16\n"   -- left by `update fromall`
+  -- another box answers the startup census ping
+  env:rednetAt(0.8, 7, { version = "16", label = "wall1" }, "basectl")
+  env:charAt(4.5, "q")
+  current = env
+  env:run("programs/historian.lua", {}, { maxTime = 7 })
+  local backOnline, rollCall
+  for _, c in ipairs(env.chatLog) do
+    if c.msg:find("back online", 1, true) and c.msg:find("v16", 1, true) then
+      backOnline = c.msg
+    end
+    if c.msg:find("wall1 v16", 1, true) then rollCall = c.msg end
+  end
+  if not backOnline then fail("no post-update version announce") end
+  if not rollCall then fail("census roll-call (wall1 v16) not relayed to chat") end
+  if env:file(".fluxupdated") ~= nil then fail("breadcrumb not cleared") end
+end)
+
+T("historian: a manual update (no breadcrumb) stays silent in chat", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  -- no .fluxupdated: this boot did NOT come from an update-all push
+  env:charAt(2.0, "q")
+  current = env
+  env:run("programs/historian.lua", {}, { maxTime = 4 })
+  for _, c in ipairs(env.chatLog) do
+    if c.msg:find("back online", 1, true) or c.msg:find("base versions", 1, true) then
+      fail("manual update announced in chat: " .. c.msg)
+    end
+  end
+end)
+
+T("fluxwall: replies to a version-census ping with its running version", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env.files[".fluxversion"] = "16\n"
+  env:rednetAt(1.0, 9, { cmd = "version?", token = "flux" }, "basectl")
   env:charAt(3.0, "q")
   current = env
-  env:run("programs/historian.lua", {}, { maxTime = 5 })
-  local saw
-  for _, c in ipairs(env.chatLog) do
-    if c.msg:find("v14", 1, true) then saw = c.msg end
+  env:run(WALL, {}, { maxTime = 6 })
+  local reply
+  for _, s in ipairs(env.rednetSent) do
+    if s.protocol == "basectl" and type(s.message) == "table"
+      and s.message.version ~= nil then reply = s.message end
   end
-  if not saw then fail("no post-update version announce in chat") end
-  if env:file(".fluxupdated") ~= nil then
-    fail("flag not cleared - would re-announce on every chunk reload")
+  if not reply then fail("no version reply broadcast") end
+  if tostring(reply.version) ~= "16" then
+    fail("version = " .. tostring(reply.version))
   end
 end)
 
@@ -1168,15 +1206,28 @@ T("update: re-downloads from the saved manifest and reboots", function()
   end
 end)
 
-T("update: records the installed version so a box can announce it on reboot", function()
+T("update: always records .fluxversion; only flags .fluxupdated for an update-all push", function()
+  -- manual update: version recorded, but NO chat-announce breadcrumb
   local env = deployRig()
   env.files[".fluxdeploy"] = "wall\n" .. MANIFEST_URL .. "\n"
   env.files["fluxwall"] = "-- old wall code"
   current = env
-  env:run("programs/update.lua", {}, { maxTime = 5 })
-  -- deployRig's manifest is version 4
-  if (env:file(".fluxupdated") or ""):gsub("%s+", "") ~= "4" then
-    fail(".fluxupdated = " .. tostring(env:file(".fluxupdated")))
+  env:run("programs/update.lua", {}, { maxTime = 5 })  -- deployRig manifest = v4
+  if (env:file(".fluxversion") or ""):gsub("%s+", "") ~= "4" then
+    fail(".fluxversion = " .. tostring(env:file(".fluxversion")))
+  end
+  if env:file(".fluxupdated") ~= nil then
+    fail("a manual update left a chat-announce breadcrumb")
+  end
+
+  -- update-all push (update fromall): both recorded
+  local env2 = deployRig()
+  env2.files[".fluxdeploy"] = "wall\n" .. MANIFEST_URL .. "\n"
+  env2.files["fluxwall"] = "-- old wall code"
+  current = env2
+  env2:run("programs/update.lua", { "fromall" }, { maxTime = 5 })
+  if (env2:file(".fluxupdated") or ""):gsub("%s+", "") ~= "4" then
+    fail(".fluxupdated = " .. tostring(env2:file(".fluxupdated")))
   end
 end)
 

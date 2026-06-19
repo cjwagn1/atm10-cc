@@ -558,20 +558,6 @@ if not openModems() then
 end
 chatBox = findChatBox()
 
--- if this boot follows an update, confirm the running version in chat once,
--- then clear the breadcrumb so ordinary reboots (chunk reloads) stay quiet
-do
-  local f = fs.open(".fluxupdated", "r")
-  if f then
-    local v = (f.readLine() or ""):gsub("%s+", "")
-    f.close()
-    fs.delete(".fluxupdated")
-    if chatBox and v ~= "" then
-      pcall(chatBox.sendMessage, "historian back online - running v" .. v, "base")
-    end
-  end
-end
-
 -- ------------------------------------------------------- base control
 -- A token-gated "update" any computer can push with `update-all` (the [u]
 -- key below runs it here). We ack so the console can tally who's alive,
@@ -582,15 +568,76 @@ local CTL_PROTOCOL = "basectl"
 local CTL_TOKEN    = "flux"  -- courtesy lock, not cryptography
 local CHAT_OWNER   = "cjwagn1"  -- only this player may fire the chat trigger;
                                -- set to nil to let any player type it
+local CENSUS_WINDOW = 3      -- seconds to gather version replies
 
 local function handleCtl(msg)
-  if type(msg) ~= "table" or msg.cmd ~= "update" or msg.token ~= CTL_TOKEN then
-    return
+  if type(msg) ~= "table" or msg.token ~= CTL_TOKEN then return end
+  if msg.cmd == "update" then
+    pcall(rednet.broadcast, { ack = true, id = os.getComputerID(),
+      label = os.getComputerLabel() }, CTL_PROTOCOL)
+    pcall(function() term.redirect(term.native()) end)
+    if shell and shell.run then shell.run("update", "fromall") end
+  elseif msg.cmd == "version?" then
+    local v
+    local vf = fs.open(".fluxversion", "r")
+    if vf then v = (vf.readLine() or ""):gsub("%s+", ""); vf.close() end
+    pcall(rednet.broadcast, { version = v or "?", id = os.getComputerID(),
+      label = os.getComputerLabel() }, CTL_PROTOCOL)
   end
-  pcall(rednet.broadcast, { ack = true, id = os.getComputerID(),
-    label = os.getComputerLabel() }, CTL_PROTOCOL)
-  pcall(function() term.redirect(term.native()) end)
-  if shell and shell.run then shell.run("update") end
+end
+
+-- Ask every base computer its running version and relay the roll-call to
+-- chat. The historian drives it (it's the chat hub), so timing is reliable:
+-- ping, wait, report whoever answered. Run after an update-all push to
+-- confirm each box actually came back on the new version.
+local function runCensus()
+  if not chatBox then return end
+  local function ping()
+    pcall(rednet.broadcast, { cmd = "version?", token = CTL_TOKEN }, CTL_PROTOCOL)
+  end
+  ping()
+  local seen, order = {}, {}
+  local deadline = os.clock() + CENSUS_WINDOW
+  local repinged = false
+  while true do
+    local left = deadline - os.clock()
+    if left <= 0 then break end
+    if not repinged and left <= CENSUS_WINDOW / 2 then ping(); repinged = true end
+    local timer = os.startTimer(left)
+    local ev = table.pack(os.pullEventRaw())
+    if ev[1] == "terminate" then
+      break
+    elseif ev[1] == "timer" and ev[2] == timer then
+      break
+    elseif ev[1] == "rednet_message" and ev[4] == CTL_PROTOCOL
+      and type(ev[3]) == "table" and ev[3].version ~= nil then
+      local who = ev[3].label or ("id " .. tostring(ev[3].id))
+      if not seen[who] then
+        seen[who] = true
+        order[#order + 1] = who .. " v" .. tostring(ev[3].version)
+      end
+    end
+  end
+  if #order > 0 then
+    table.sort(order)
+    pcall(chatBox.sendMessage, "base versions - " .. table.concat(order, ", "), "base")
+  end
+end
+
+-- if this boot follows an update-all push, confirm the running version in
+-- chat once and census the rest of the base, then clear the breadcrumb. A
+-- manual `update` leaves no breadcrumb, so it stays silent.
+do
+  local f = fs.open(".fluxupdated", "r")
+  if f then
+    local v = (f.readLine() or ""):gsub("%s+", "")
+    f.close()
+    fs.delete(".fluxupdated")
+    if chatBox and v ~= "" then
+      pcall(chatBox.sendMessage, "historian back online - running v" .. v, "base")
+      runCensus()
+    end
+  end
 end
 
 render()

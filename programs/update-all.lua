@@ -117,6 +117,6 @@ if chatBox then pcall(chatBox.sendMessage, summary, "base") end
 -- hand the terminal back in case a display had it redirected to a monitor
 pcall(function() term.redirect(term.native()) end)
 if shell and shell.run then
-  shell.run("update")  -- downloads + reboots into our own role
+  shell.run("update", "fromall")  -- downloads + reboots into our own role
 end
 print("update failed - run 'update' by hand to see why.")

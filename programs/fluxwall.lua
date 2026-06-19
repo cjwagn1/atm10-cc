@@ -453,13 +453,20 @@ local CTL_PROTOCOL = "basectl"
 local CTL_TOKEN    = "flux"  -- courtesy lock, not cryptography
 
 local function handleCtl(msg)
-  if type(msg) ~= "table" or msg.cmd ~= "update" or msg.token ~= CTL_TOKEN then
-    return
+  if type(msg) ~= "table" or msg.token ~= CTL_TOKEN then return end
+  if msg.cmd == "update" then
+    pcall(rednet.broadcast, { ack = true, id = os.getComputerID(),
+      label = os.getComputerLabel() }, CTL_PROTOCOL)
+    pcall(function() term.redirect(term.native()) end)
+    if shell and shell.run then shell.run("update", "fromall") end
+  elseif msg.cmd == "version?" then
+    -- a version census: reply with the version update.lua recorded for us
+    local v
+    local vf = fs.open(".fluxversion", "r")
+    if vf then v = (vf.readLine() or ""):gsub("%s+", ""); vf.close() end
+    pcall(rednet.broadcast, { version = v or "?", id = os.getComputerID(),
+      label = os.getComputerLabel() }, CTL_PROTOCOL)
   end
-  pcall(rednet.broadcast, { ack = true, id = os.getComputerID(),
-    label = os.getComputerLabel() }, CTL_PROTOCOL)
-  pcall(function() term.redirect(term.native()) end)
-  if shell and shell.run then shell.run("update") end
 end
 
 local timer = os.startTimer(REFRESH)
