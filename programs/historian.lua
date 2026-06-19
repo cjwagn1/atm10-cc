@@ -49,7 +49,10 @@ local ALERTS = {
   -- the silent base-killer: ME storage filling toward a crafting jam
   { source = "me", metric = "usedPct", above = 90, forSeconds = 60,
     label = "ME storage over 90% full" },
-  { source = "me", runway = "full", withinSeconds = 1200, rateWindow = 120 },
+  -- only project "full" once storage is genuinely high (>=75%); below that a
+  -- positive blip is just a craft/import, not a jam heading our way
+  { source = "me", runway = "full", withinSeconds = 1200, rateWindow = 120,
+    minPct = 75 },
 }
 
 -- ------------------------------------------------------------- utilities
@@ -408,7 +411,12 @@ local function checkRunwayRules()
               if rule.runway == "empty" and rate < 0 then
                 secs = cur / -rate
               elseif rule.runway == "full" and rate > 0 and cap and cap > cur then
-                secs = (cap - cur) / rate
+                -- ignore the projection unless we're already past the
+                -- high-fill floor: a positive blip at 50% is not a jam
+                local pct = cur / cap * 100
+                if not rule.minPct or pct >= rule.minPct then
+                  secs = (cap - cur) / rate
+                end
               end
             end
             if secs and secs > 0 and secs <= rule.withinSeconds then

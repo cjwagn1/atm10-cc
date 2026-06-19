@@ -787,6 +787,25 @@ T("historian: ME-full runway projects when storage will fill", function()
   end
 end)
 
+T("historian: no ME-full alarm while storage is only half full", function()
+  -- ME drifting 30M->36M of 72M (~42%->50%): a craft/import bump, not a jam.
+  -- The full-runway must stay quiet below its high-fill floor (the false
+  -- 'me full in ~2m' that fired at 50%).
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  for t = 1, 130, 10 do
+    env:rednetAt(t, 8, { v = 1, source = "me", tick = 0, data = {
+      usedBytes = 30000000 + (t - 1) * 50000, totalBytes = 72000000,
+      cpus = 2, cpusBusy = 1 } }, "telemetry")
+  end
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 140 })
+  if res.reason == "error" then fail("crashed: " .. tostring(res.err)) end
+  local cried = chatHas(env, "full")
+  if cried then fail("false ME-full alarm at ~50%: " .. cried) end
+end)
+
 T("historian: heartbeat posts a periodic 'base' digest proving it's alive", function()
   local env = CC.new{ termW = 61, termH = 20 }
   env:addModem("top")
