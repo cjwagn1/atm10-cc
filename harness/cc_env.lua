@@ -1652,7 +1652,8 @@ local function buildSandbox(env)
   -- the standard updater). Resolves the virtual fs first, then
   -- programs/<name>.lua on disk. Reboot/shutdown sentinels propagate.
   G.shell = {
-    run = function(name)
+    run = function(name, ...)
+      local fwd = { ... }
       local src = env.files[name] or env.files[name .. ".lua"]
       if not src then
         local f = io.open("programs/" .. name .. ".lua", "r")
@@ -1664,7 +1665,7 @@ local function buildSandbox(env)
       if not src then return false end
       local chunk, err = load(src, "@" .. name, "t", G)
       if not chunk then error(err, 0) end
-      chunk()
+      chunk(table.unpack(fwd))
       return true
     end,
   }

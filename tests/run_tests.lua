@@ -1084,7 +1084,7 @@ T("fluxwall: replies to a version-census ping with its running version", functio
   end
 end)
 
-T("update-all: posts the target version and ack tally to chat", function()
+T("update-all chat: posts the version and a per-computer ack line to chat", function()
   local env = CC.new{ termW = 61, termH = 20 }
   env:addModem("top")
   env:addChatBox("chat_box_0")
@@ -1094,14 +1094,61 @@ T("update-all: posts the target version and ack tally to chat", function()
   env.files["update"] = FAKE_UPDATER
   env:rednetAt(0.5, 7, { ack = true, label = "wall1" }, "basectl")
   current = env
-  env:run(UPDATEALL, {}, { maxTime = 7 })
+  env:run(UPDATEALL, { "chat" }, { maxTime = 7 })  -- "chat" = loud mode
   local sawVer, sawAck
   for _, c in ipairs(env.chatLog) do
     if c.msg:find("v13", 1, true) then sawVer = c.msg end
-    if c.msg:find("wall1", 1, true) then sawAck = c.msg end
+    if c.msg:find("wall1", 1, true) and c.msg:lower():find("ack", 1, true) then
+      sawAck = c.msg
+    end
   end
   if not sawVer then fail("target version not announced in chat") end
-  if not sawAck then fail("ack tally not posted to chat") end
+  if not sawAck then fail("per-computer ack line not posted to chat") end
+end)
+
+T("update-all (no arg / quiet): updates the base but posts nothing to chat", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  env.files["update"] = FAKE_UPDATER
+  env:rednetAt(0.5, 7, { ack = true, label = "wall1" }, "basectl")
+  current = env
+  env:run(UPDATEALL, {}, { maxTime = 7 })  -- quiet (e.g. from [u] / console)
+  for _, c in ipairs(env.chatLog) do
+    fail("quiet update-all posted to chat: " .. c.msg)
+  end
+end)
+
+T("historian: a chat-typed 'update-all' is loud (acks reach chat)", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  env.files["update"] = FAKE_UPDATER  -- update-all's self-update reboots out
+  env:chatAt(1.0, "cjwagn1", "update-all")
+  env:rednetAt(1.4, 7, { ack = true, label = "wall1" }, "basectl")
+  current = env
+  env:run("programs/historian.lua", {}, { maxTime = 9 })
+  local sawAck
+  for _, c in ipairs(env.chatLog) do
+    if c.msg:find("wall1", 1, true) and c.msg:lower():find("ack", 1, true) then
+      sawAck = true
+    end
+  end
+  if not sawAck then fail("chat-typed update-all did not log acks to chat") end
+end)
+
+T("historian: pressing [u] is quiet (updates base, no chat spam)", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  env.files["update"] = FAKE_UPDATER
+  env:charAt(1.0, "u")
+  env:rednetAt(1.4, 7, { ack = true, label = "wall1" }, "basectl")
+  current = env
+  env:run("programs/historian.lua", {}, { maxTime = 9 })
+  for _, c in ipairs(env.chatLog) do
+    fail("[u] posted to chat: " .. c.msg)
+  end
 end)
 
 -- ------------------------------------------------------------------- eta
@@ -1183,6 +1230,15 @@ T("installer: sets up a wall computer with startup + update pointer", function()
   expectContains(env:file("startup.lua") or "", "fluxwall", "startup.lua")
   expectContains(env:file(".fluxdeploy") or "", MANIFEST_URL, ".fluxdeploy")
   expectContains(env:file(".fluxdeploy") or "", "wall", ".fluxdeploy role")
+end)
+
+T("installer: records .fluxversion so a fresh box reports its version", function()
+  local env = deployRig()
+  current = env
+  env:run("programs/installer.lua", { "wall", MANIFEST_URL }, { maxTime = 3 })
+  if (env:file(".fluxversion") or ""):gsub("%s+", "") ~= "4" then  -- deployRig = v4
+    fail(".fluxversion = " .. tostring(env:file(".fluxversion")))
+  end
 end)
 
 T("installer: accepts any role defined in the manifest (me)", function()
@@ -1310,7 +1366,7 @@ T("console: tapping UPDATE SLEDS broadcasts a sled update when a token is set", 
   env:addModem("top")
   env:addMonitor("monitor_0", { w = 36, h = 18 })
   env.files["sledctl.conf"] = 'return { token = "hunter2" }'
-  env:touchAt(1.5, "monitor_0", 10, 11)  -- inside the UPDATE SLEDS button
+  env:touchAt(1.5, "monitor_0", 10, 9)   -- inside the UPDATE SLEDS button
   env:charAt(3.0, "q")
   current = env
   env:run(CONSOLE, {}, { maxTime = 5 })

@@ -584,7 +584,10 @@ local function handleCtl(msg)
     pcall(rednet.broadcast, { ack = true, id = os.getComputerID(),
       label = os.getComputerLabel() }, CTL_PROTOCOL)
     pcall(function() term.redirect(term.native()) end)
-    if shell and shell.run then shell.run("update", "fromall") end
+    -- loud push -> leave the announce breadcrumb (fromall); quiet push -> not
+    if shell and shell.run then
+      if msg.loud then shell.run("update", "fromall") else shell.run("update") end
+    end
   elseif msg.cmd == "version?" then
     local v
     local vf = fs.open(".fluxversion", "r")
@@ -663,9 +666,10 @@ while true do
   elseif ev[1] == "chat" and type(ev[3]) == "string"
     and ev[3]:lower():gsub("[%s%-]", "") == "updateall"
     and (not CHAT_OWNER or ev[2] == CHAT_OWNER) then
-    -- a player typed "update-all" (or "update all") in chat: same push
+    -- a player typed "update-all" (or "update all") in chat: the LOUD push
+    -- (narrates the version + each ack to chat). [u] runs it quietly instead.
     pcall(function() term.redirect(term.native()) end)
-    if shell and shell.run then shell.run("update-all") end
+    if shell and shell.run then shell.run("update-all", "chat") end
   elseif ev[1] == "rednet_message" and ev[4] == CTL_PROTOCOL
     and type(ev[3]) == "table" then
     handleCtl(ev[3])

@@ -10,10 +10,18 @@ files from the deploy manifest and reboots back into its role (startup.lua).
 Run it anywhere on the base mesh:  update-all
 The historian's [u] key runs this same program.
 
+LOUD vs QUIET: `update-all chat` (how the historian's chat trigger runs it)
+narrates to chat - the version, each ack as it lands, and the summary. Plain
+`update-all` (the [u] key, the console button) does the same push but stays
+out of chat; you're at a screen, so it just prints there. Only the loud path
+leaves the post-update breadcrumb that makes the historian announce on reboot.
+
 Sleds are deliberately NOT included - they listen on their own "sledctl"
 channel, so one never reboots mid-relocation by surprise. Update the fleet
 from sledctl (press u) when it's safe.
 ]]
+
+local loud = (select(1, ...) == "chat")  -- narrate to chat?
 
 local CTL_PROTOCOL = "basectl"
 local CTL_TOKEN    = "flux"  -- courtesy lock, not cryptography; matches the
@@ -67,7 +75,7 @@ if not openModems() then
   return
 end
 
-local chatBox = findChatBox()
+local chatBox = loud and findChatBox() or nil  -- chat only in loud mode
 local ver     = targetVersion()
 local vtag    = ver and ("v" .. tostring(ver)) or "the latest version"
 
@@ -76,7 +84,10 @@ if chatBox then
 end
 
 print("Broadcasting update to the base (" .. vtag .. ")...")
-rednet.broadcast({ cmd = "update", token = CTL_TOKEN }, CTL_PROTOCOL)
+-- the loud flag rides along so each box knows whether to leave the
+-- post-update breadcrumb (and thus whether the historian announces on reboot)
+rednet.broadcast({ cmd = "update", token = CTL_TOKEN, loud = loud or nil },
+  CTL_PROTOCOL)
 
 -- gather acks for a rough "who heard us" tally. Best-effort: every box
 -- updates whether or not its ack lands inside the window, so a missing name
@@ -97,6 +108,7 @@ while true do
       seen[who] = true
       order[#order + 1] = who
       print("  ack  " .. who)
+      if chatBox then pcall(chatBox.sendMessage, "ack " .. who, "base") end
     end
   end
 end
@@ -117,6 +129,7 @@ if chatBox then pcall(chatBox.sendMessage, summary, "base") end
 -- hand the terminal back in case a display had it redirected to a monitor
 pcall(function() term.redirect(term.native()) end)
 if shell and shell.run then
-  shell.run("update", "fromall")  -- downloads + reboots into our own role
+  -- only the loud (chat) path leaves the announce breadcrumb on reboot
+  if loud then shell.run("update", "fromall") else shell.run("update") end
 end
 print("update failed - run 'update' by hand to see why.")

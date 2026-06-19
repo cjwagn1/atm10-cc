@@ -458,7 +458,10 @@ local function handleCtl(msg)
     pcall(rednet.broadcast, { ack = true, id = os.getComputerID(),
       label = os.getComputerLabel() }, CTL_PROTOCOL)
     pcall(function() term.redirect(term.native()) end)
-    if shell and shell.run then shell.run("update", "fromall") end
+    -- loud push -> leave the announce breadcrumb (fromall); quiet push -> not
+    if shell and shell.run then
+      if msg.loud then shell.run("update", "fromall") else shell.run("update") end
+    end
   elseif msg.cmd == "version?" then
     -- a version census: reply with the version update.lua recorded for us
     local v

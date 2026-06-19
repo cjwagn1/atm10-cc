@@ -6,16 +6,16 @@ Right-click a button to fire a base-wide command:
 
   UPDATE ALL    push `update` to the whole stationary base (walls, dashes,
                 ME sensor, historian); tap VERSIONS after to confirm
-  VERSIONS      census every base computer and show the roll-call here
+  VERSIONS      census every base computer and show the roll-call here,
+                color-coded so an out-of-date box stands out
   UPDATE SLEDS  push `update` to the sled fleet (needs the sled token in
                 sledctl.conf on this computer)
 
 This is a controller: it sends commands and answers version censuses (so it
 shows up in roll-calls), but it deliberately IGNORES `update` pushes itself -
 a panel that reboots mid-tap is bad. Update it by hand with `update` on the
-rare occasion its own code changes. Sleds keep their own "sledctl" channel.
-
-Put the monitor above your base near the AE console and tap away.
+rare occasion its own code changes. Its pushes are quiet (no chat); type
+"update-all" in chat for the narrated version. Sleds keep their own channel.
 ]]
 
 local CTL_PROTOCOL  = "basectl"
@@ -69,56 +69,95 @@ if not mon then
 end
 pcall(mon.setTextScale, 1)
 
-local status = "ready - tap a command"
-
--- full-width buttons stacked top to bottom
-local BTN_H = 3
-local buttons = {
-  { label = "UPDATE ALL" },
-  { label = "VERSIONS" },
-  { label = "UPDATE SLEDS" },
+-- palette (gracefully ignored on a non-color monitor)
+local C = {
+  title = colors.blue, titleText = colors.white, bg = colors.black,
+  hint = colors.lightGray, head = colors.cyan, info = colors.white,
+  ok = colors.lime, warn = colors.orange,
 }
+local buttons = {
+  { label = "UPDATE ALL",   color = colors.red,   text = colors.white },
+  { label = "VERSIONS",     color = colors.cyan,  text = colors.black },
+  { label = "UPDATE SLEDS", color = colors.green, text = colors.white },
+}
+
+-- full-width buttons stacked under a title bar; results fill the space below
+local BTN_H = 2
+local resultsRow
 do
-  local y = 2
+  local y = 3
   for _, b in ipairs(buttons) do
     b.y1, b.y2 = y, y + BTN_H - 1
     y = y + BTN_H + 1   -- one blank row between buttons
   end
+  resultsRow = y
 end
+
+local status = "ready - tap a command"
+local resultLines = {}   -- { { text = , color = }, ... } shown below buttons
 
 local function draw()
   local w, h = mon.getSize()
   local can = mon.isColor and mon.isColor()
-  mon.setBackgroundColor(colors.black)
-  mon.clear()
+  local function bg(c) mon.setBackgroundColor(can and c or colors.black) end
+  local function fg(c) mon.setTextColor(can and c or colors.white) end
+  local function bar(row, text, padColor, txtColor)
+    bg(padColor); fg(txtColor)
+    if row <= h then
+      mon.setCursorPos(1, row); mon.write((" "):rep(w))
+      mon.setCursorPos(math.max(1, math.floor((w - #text) / 2) + 1), row)
+      mon.write(text)
+    end
+  end
+
+  bg(C.bg); mon.clear()
+
+  -- title bar with our own version on the right
+  bg(C.title); fg(C.titleText)
+  mon.setCursorPos(1, 1); mon.write((" "):rep(w))
+  local title = "BASE CONTROL"
+  mon.setCursorPos(math.max(1, math.floor((w - #title) / 2) + 1), 1)
+  mon.write(title)
+  local vtag = "v" .. myVersion()
+  mon.setCursorPos(math.max(1, w - #vtag + 1), 1); mon.write(vtag)
+
+  -- buttons
   for _, b in ipairs(buttons) do
-    if can then mon.setBackgroundColor(colors.gray) end
+    bg(b.color); fg(b.text)
     for row = b.y1, b.y2 do
-      if row <= h then
-        mon.setCursorPos(1, row)
-        mon.write((" "):rep(w))
-      end
+      if row <= h then mon.setCursorPos(1, row); mon.write((" "):rep(w)) end
     end
     local mid = math.floor((b.y1 + b.y2) / 2)
     if mid <= h then
-      if can then mon.setTextColor(colors.white) end
       mon.setCursorPos(math.max(1, math.floor((w - #b.label) / 2) + 1), mid)
       mon.write(b.label)
     end
   end
-  mon.setBackgroundColor(colors.black)
-  if can then mon.setTextColor(colors.lightGray) end
-  mon.setCursorPos(1, h)
-  mon.write(status:sub(1, w))
-  if can then mon.setTextColor(colors.white) end
+
+  -- results panel
+  bg(C.bg)
+  local row = resultsRow
+  for _, line in ipairs(resultLines) do
+    if row <= h - 1 then
+      fg(line.color or C.info)
+      mon.setCursorPos(2, row); mon.write(tostring(line.text):sub(1, w - 2))
+      row = row + 1
+    end
+  end
+
+  -- status / hint at the very bottom
+  fg(C.hint)
+  mon.setCursorPos(1, h); mon.write(status:sub(1, w))
+  fg(colors.white)
 end
 
--- ping every base computer for its version; return a sorted roll-call string
+-- census: returns { { label = , version = }, ... } including ourselves,
+-- sorted by label (we never hear our own ping, so we add ourselves)
 local function census()
   rednet.broadcast({ cmd = "version?", token = CTL_TOKEN }, CTL_PROTOCOL)
   local label = os.getComputerLabel() or "console"
-  local seen, order = {}, { label .. " v" .. myVersion() }  -- include self
-  seen[label] = true
+  local list = { { label = label, version = myVersion() } }
+  local seen = { [label] = true }
   local deadline = os.clock() + CENSUS_WINDOW
   while true do
     local left = deadline - os.clock()
@@ -134,29 +173,55 @@ local function census()
       local who = ev[3].label or ("id " .. tostring(ev[3].id))
       if not seen[who] then
         seen[who] = true
-        order[#order + 1] = who .. " v" .. tostring(ev[3].version)
+        list[#list + 1] = { label = who, version = tostring(ev[3].version) }
       end
     end
   end
-  table.sort(order)
-  return table.concat(order, ", ")
+  table.sort(list, function(a, b) return a.label < b.label end)
+  return list
+end
+
+local function showVersions()
+  status = "checking versions..."
+  draw()
+  local list = census()
+  -- the most common version is "current"; flag the odd ones out
+  local counts = {}
+  for _, e in ipairs(list) do counts[e.version] = (counts[e.version] or 0) + 1 end
+  local mode, best = "?", -1
+  for v, n in pairs(counts) do if n > best then best, mode = n, v end end
+  resultLines = { { text = ("VERSIONS  (%d computers)"):format(#list),
+    color = C.head } }
+  for _, e in ipairs(list) do
+    local sync = (e.version == mode and e.version ~= "?")
+    resultLines[#resultLines + 1] = {
+      text = ("  %-15s v%s%s"):format(e.label, e.version,
+        sync and "" or "   <- check"),
+      color = sync and C.ok or C.warn,
+    }
+  end
+  status = (best == #list and #list > 0)
+    and "all in sync" or "versions differ - see the orange rows"
 end
 
 buttons[1].action = function()
   rednet.broadcast({ cmd = "update", token = CTL_TOKEN }, CTL_PROTOCOL)
-  status = "update pushed - tap VERSIONS in a few sec to confirm"
+  resultLines = {
+    { text = "UPDATE pushed to the base.", color = C.info },
+    { text = "tap VERSIONS in a few seconds to confirm.", color = C.hint },
+  }
+  status = "update pushed"
 end
-buttons[2].action = function()
-  status = "checking versions..."
-  draw()
-  status = census()
-end
+buttons[2].action = showVersions
 buttons[3].action = function()
   if not sledToken then
-    status = "no sled token - add sledctl.conf to update sleds"
+    resultLines = { { text = "No sled token on this computer.", color = C.warn },
+      { text = "add sledctl.conf to enable sled updates.", color = C.hint } }
+    status = "no sled token"
     return
   end
   rednet.broadcast({ cmd = "update", token = sledToken }, SLED_PROTOCOL)
+  resultLines = { { text = "Sled fleet update pushed.", color = C.ok } }
   status = "sled update pushed"
 end
 

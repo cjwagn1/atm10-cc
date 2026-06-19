@@ -92,6 +92,15 @@ local f = fs.open(".fluxdeploy", "w")
 f.write(role .. "\n" .. manifestUrl .. "\n")
 f.close()
 
+-- record the installed version so this box reports it in a census right
+-- away (update.lua keeps this current; the console never auto-updates, so
+-- without this it would read "v?" forever)
+local vf = fs.open(".fluxversion", "w")
+if vf then
+  vf.write(tostring(manifest.version))
+  vf.close()
+end
+
 print(("Installed v%s as role '%s'."):format(
   tostring(manifest.version), role))
 print("Run 'update' anytime to pull the latest.")
