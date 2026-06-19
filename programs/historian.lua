@@ -558,6 +558,20 @@ if not openModems() then
 end
 chatBox = findChatBox()
 
+-- if this boot follows an update, confirm the running version in chat once,
+-- then clear the breadcrumb so ordinary reboots (chunk reloads) stay quiet
+do
+  local f = fs.open(".fluxupdated", "r")
+  if f then
+    local v = (f.readLine() or ""):gsub("%s+", "")
+    f.close()
+    fs.delete(".fluxupdated")
+    if chatBox and v ~= "" then
+      pcall(chatBox.sendMessage, "historian back online - running v" .. v, "base")
+    end
+  end
+end
+
 -- ------------------------------------------------------- base control
 -- A token-gated "update" any computer can push with `update-all` (the [u]
 -- key below runs it here). We ack so the console can tally who's alive,
@@ -566,8 +580,8 @@ chatBox = findChatBox()
 -- deliberately untouched by this.
 local CTL_PROTOCOL = "basectl"
 local CTL_TOKEN    = "flux"  -- courtesy lock, not cryptography
-local CHAT_OWNER   = nil     -- set to "YourName" to only accept the chat
-                             -- trigger from you; nil = any player may type it
+local CHAT_OWNER   = "cjwagn1"  -- only this player may fire the chat trigger;
+                               -- set to nil to let any player type it
 
 local function handleCtl(msg)
   if type(msg) ~= "table" or msg.cmd ~= "update" or msg.token ~= CTL_TOKEN then

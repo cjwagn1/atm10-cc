@@ -974,23 +974,57 @@ T("historian: 'u' launches update-all to push to the whole base", function()
   if env:file("pushed.flag") ~= "yes" then fail("update-all did not run") end
 end)
 
-T("historian: typing 'update-all' in chat launches the base update", function()
+local PUSH_STUB = [[
+  local f = fs.open("pushed.flag", "w")
+  f.write("yes")
+  f.close()
+  os.reboot()
+]]
+
+T("historian: the owner typing 'update-all' in chat launches the base update", function()
   local env = CC.new{ termW = 61, termH = 20 }
   env:addModem("top")
   env:addChatBox("chat_box_0")
-  env.files["update-all"] = [[
-    local f = fs.open("pushed.flag", "w")
-    f.write("yes")
-    f.close()
-    os.reboot()
-  ]]
-  env:chatAt(1.5, "Steve", "update-all")  -- a player types the trigger
+  env.files["update-all"] = PUSH_STUB
+  env:chatAt(1.5, "cjwagn1", "update-all")  -- the owner types the trigger
   current = env
   local res = env:run("programs/historian.lua", {}, { maxTime = 6 })
   if res.reason ~= "shutdown" or not res.reboot then
     fail("chat trigger did not launch update-all, got " .. tostring(res.reason))
   end
   if env:file("pushed.flag") ~= "yes" then fail("update-all did not run") end
+end)
+
+T("historian: a non-owner's 'update-all' chat message is ignored", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  env.files["update-all"] = PUSH_STUB
+  env:chatAt(1.5, "RandoGriefer", "update-all")
+  env:charAt(3.0, "q")  -- quit cleanly; the trigger should NOT have fired
+  current = env
+  env:run("programs/historian.lua", {}, { maxTime = 6 })
+  if env:file("pushed.flag") ~= nil then
+    fail("a non-owner triggered the base update")
+  end
+end)
+
+T("historian: announces its version in chat once after a post-update reboot", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env:addChatBox("chat_box_0")
+  env.files[".fluxupdated"] = "14\n"  -- left by update.lua just before reboot
+  env:charAt(3.0, "q")
+  current = env
+  env:run("programs/historian.lua", {}, { maxTime = 5 })
+  local saw
+  for _, c in ipairs(env.chatLog) do
+    if c.msg:find("v14", 1, true) then saw = c.msg end
+  end
+  if not saw then fail("no post-update version announce in chat") end
+  if env:file(".fluxupdated") ~= nil then
+    fail("flag not cleared - would re-announce on every chunk reload")
+  end
 end)
 
 T("update-all: posts the target version and ack tally to chat", function()
@@ -1131,6 +1165,18 @@ T("update: re-downloads from the saved manifest and reboots", function()
   end
   if env:file("fluxwall") ~= "-- wall code v2" then
     fail("fluxwall not updated: " .. tostring(env:file("fluxwall")))
+  end
+end)
+
+T("update: records the installed version so a box can announce it on reboot", function()
+  local env = deployRig()
+  env.files[".fluxdeploy"] = "wall\n" .. MANIFEST_URL .. "\n"
+  env.files["fluxwall"] = "-- old wall code"
+  current = env
+  env:run("programs/update.lua", {}, { maxTime = 5 })
+  -- deployRig's manifest is version 4
+  if (env:file(".fluxupdated") or ""):gsub("%s+", "") ~= "4" then
+    fail(".fluxupdated = " .. tostring(env:file(".fluxupdated")))
   end
 end)
 

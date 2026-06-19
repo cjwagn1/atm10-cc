@@ -61,6 +61,14 @@ if startupProg then
   out.close()
 end
 
+-- leave a one-shot breadcrumb so the role program can confirm the new
+-- version in chat on the boot that follows (the historian reads + clears it)
+local stamp = fs.open(".fluxupdated", "w")
+if stamp then
+  stamp.write(tostring(manifest.version))
+  stamp.close()
+end
+
 print(("Now at v%s. Rebooting..."):format(tostring(manifest.version)))
 sleep(1)
 os.reboot()
