@@ -127,11 +127,31 @@ end
 sample()
 render()
 
+-- ------------------------------------------------------- base control
+-- token-gated "update" pushed by `update-all` / the historian's [u]: ack,
+-- hand the terminal back, then run the standard updater (download + reboot
+-- into our role). Sleds keep their own "sledctl" channel.
+local CTL_PROTOCOL = "basectl"
+local CTL_TOKEN    = "flux"  -- courtesy lock, not cryptography
+
+local function handleCtl(msg)
+  if type(msg) ~= "table" or msg.cmd ~= "update" or msg.token ~= CTL_TOKEN then
+    return
+  end
+  pcall(rednet.broadcast, { ack = true, id = os.getComputerID(),
+    label = os.getComputerLabel() }, CTL_PROTOCOL)
+  pcall(function() term.redirect(term.native()) end)
+  if shell and shell.run then shell.run("update") end
+end
+
 local timer = os.startTimer(REFRESH)
 while true do
   local ev = table.pack(os.pullEventRaw())
   if ev[1] == "terminate" or (ev[1] == "char" and ev[2] == "q") then
     break
+  elseif ev[1] == "rednet_message" and ev[4] == CTL_PROTOCOL
+    and type(ev[3]) == "table" then
+    handleCtl(ev[3])
   elseif ev[1] == "timer" and ev[2] == timer then
     sample()
     render()

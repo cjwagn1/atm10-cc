@@ -545,7 +545,7 @@ local function render()
   t.write("chat box: " .. (chatBox and "connected" or "none")
     .. "  ws: " .. (wsUrl and (ws and "up" or "configured") or "off"))
   t.setCursorPos(1, y + 4)
-  t.write("[q] quit")
+  t.write("[u] update entire base   [q] quit")
   if t.isColor and t.isColor() then t.setTextColor(colors.white) end
 end
 
@@ -558,6 +558,25 @@ if not openModems() then
 end
 chatBox = findChatBox()
 
+-- ------------------------------------------------------- base control
+-- A token-gated "update" any computer can push with `update-all` (the [u]
+-- key below runs it here). We ack so the console can tally who's alive,
+-- hand the terminal back, then run the standard updater (download +
+-- reboot into our role). Sleds use their own "sledctl" channel and are
+-- deliberately untouched by this.
+local CTL_PROTOCOL = "basectl"
+local CTL_TOKEN    = "flux"  -- courtesy lock, not cryptography
+
+local function handleCtl(msg)
+  if type(msg) ~= "table" or msg.cmd ~= "update" or msg.token ~= CTL_TOKEN then
+    return
+  end
+  pcall(rednet.broadcast, { ack = true, id = os.getComputerID(),
+    label = os.getComputerLabel() }, CTL_PROTOCOL)
+  pcall(function() term.redirect(term.native()) end)
+  if shell and shell.run then shell.run("update") end
+end
+
 render()
 local snapTimer = os.startTimer(SNAP_EVERY)
 local tickTimer = os.startTimer(1)
@@ -566,6 +585,13 @@ while true do
   local ev = table.pack(os.pullEventRaw())
   if ev[1] == "terminate" or (ev[1] == "char" and ev[2] == "q") then
     break
+  elseif ev[1] == "char" and ev[2] == "u" then
+    -- push the latest version to the whole base, then update self
+    pcall(function() term.redirect(term.native()) end)
+    if shell and shell.run then shell.run("update-all") end
+  elseif ev[1] == "rednet_message" and ev[4] == CTL_PROTOCOL
+    and type(ev[3]) == "table" then
+    handleCtl(ev[3])
   elseif ev[1] == "rednet_message" and ev[4] == PROTOCOL
     and type(ev[3]) == "table" then
     ingest(ev[3])

@@ -849,6 +849,131 @@ T("historian: heartbeat shows absolute flux + max capacity, not a dead 0%", func
   expectNotContains(hb, "base:", "no repeated 'base:' label")
 end)
 
+-- ----------------------------------------- base-wide update-all (v13)
+
+local UPDATEALL = "programs/update-all.lua"
+-- a stand-in for the real updater: prove it ran, then reboot like update.lua
+local FAKE_UPDATER = [[
+  local f = fs.open("updated.flag", "w")
+  f.write("yes")
+  f.close()
+  os.reboot()
+]]
+
+T("update-all: broadcasts the token-gated update, tallies acks, then updates self", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env.files["update"] = FAKE_UPDATER
+  -- a base computer answers the broadcast inside the ack window
+  env:rednetAt(0.5, 7, { ack = true, label = "wall1" }, "basectl")
+  current = env
+  local res = env:run(UPDATEALL, {}, { maxTime = 6 })
+  if res.reason ~= "shutdown" or not res.reboot then
+    fail("expected self-update reboot, got " .. tostring(res.reason))
+  end
+  if env:file("updated.flag") ~= "yes" then fail("updater did not run on self") end
+  local sent
+  for _, s in ipairs(env.rednetSent) do
+    if s.protocol == "basectl" and type(s.message) == "table"
+      and s.message.cmd == "update" then sent = s end
+  end
+  if not sent then fail("no basectl update broadcast") end
+  if sent.message.token ~= "flux" then
+    fail("token = " .. tostring(sent.message.token))
+  end
+  expectContains(env:termText(), "wall1", "tallies the ack from wall1")
+end)
+
+T("fluxwall: a token-gated basectl update runs the updater (display joins the push)", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env.files["update"] = FAKE_UPDATER
+  env:rednetAt(1.0, 9, { cmd = "update", token = "flux" }, "basectl")
+  current = env
+  local res = env:run(WALL, {}, { maxTime = 6 })
+  if res.reason ~= "shutdown" or not res.reboot then
+    fail("wall did not self-update on basectl cmd, got " .. tostring(res.reason))
+  end
+  if env:file("updated.flag") ~= "yes" then fail("updater did not run") end
+end)
+
+T("fluxdash: a token-gated basectl update runs the updater", function()
+  local env = rig{ charge = 0 }
+  env.files["update"] = FAKE_UPDATER
+  env:rednetAt(1.0, 9, { cmd = "update", token = "flux" }, "basectl")
+  current = env
+  local res = env:run(V2, {}, { maxTime = 6 })
+  if res.reason ~= "shutdown" or not res.reboot then
+    fail("dash did not self-update, got " .. tostring(res.reason))
+  end
+  if env:file("updated.flag") ~= "yes" then fail("updater did not run") end
+end)
+
+T("mesensor: a token-gated basectl update runs the updater", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  env:addMeBridge("me_bridge_0", {
+    stored = 1, max = 2, usage = 1, input = 1,
+    totalItemStorage = 100, usedItemStorage = 10,
+  })
+  env.files["update"] = FAKE_UPDATER
+  env:rednetAt(1.0, 9, { cmd = "update", token = "flux" }, "basectl")
+  current = env
+  local res = env:run("programs/mesensor.lua", {}, { maxTime = 6 })
+  if res.reason ~= "shutdown" or not res.reboot then
+    fail("mesensor did not self-update, got " .. tostring(res.reason))
+  end
+  if env:file("updated.flag") ~= "yes" then fail("updater did not run") end
+end)
+
+T("historian: a token-gated basectl update acks then updates; wrong token ignored", function()
+  -- wrong token: historian keeps running (courtesy lock, like the sleds)
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env.files["update"] = FAKE_UPDATER
+  env:rednetAt(1.0, 9, { cmd = "update", token = "nope" }, "basectl")
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 5 })
+  if res.reason == "shutdown" then fail("rebooted on a bad token") end
+  if env:file("updated.flag") ~= nil then fail("wrong token ran the updater") end
+
+  -- right token: ack first (so a console can tally), then update + reboot
+  local env2 = CC.new{ termW = 61, termH = 20 }
+  env2:addModem("top")
+  env2.files["update"] = FAKE_UPDATER
+  env2:rednetAt(1.0, 9, { cmd = "update", token = "flux" }, "basectl")
+  current = env2
+  local res2 = env2:run("programs/historian.lua", {}, { maxTime = 6 })
+  if res2.reason ~= "shutdown" or not res2.reboot then
+    fail("historian did not self-update, got " .. tostring(res2.reason))
+  end
+  if env2:file("updated.flag") ~= "yes" then fail("updater did not run") end
+  local acked
+  for _, s in ipairs(env2.rednetSent) do
+    if s.protocol == "basectl" and type(s.message) == "table"
+      and s.message.ack then acked = true end
+  end
+  if not acked then fail("historian did not ack before updating") end
+end)
+
+T("historian: 'u' launches update-all to push to the whole base", function()
+  local env = CC.new{ termW = 61, termH = 20 }
+  env:addModem("top")
+  env.files["update-all"] = [[
+    local f = fs.open("pushed.flag", "w")
+    f.write("yes")
+    f.close()
+    os.reboot()
+  ]]
+  env:charAt(1.5, "u")
+  current = env
+  local res = env:run("programs/historian.lua", {}, { maxTime = 6 })
+  if res.reason ~= "shutdown" or not res.reboot then
+    fail("u did not launch update-all, got " .. tostring(res.reason))
+  end
+  if env:file("pushed.flag") ~= "yes" then fail("update-all did not run") end
+end)
+
 -- ------------------------------------------------------------------- eta
 
 T("wall: shows time until empty while draining", function()
