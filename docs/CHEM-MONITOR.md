@@ -130,7 +130,7 @@ it. Everything joins `update-all` and the console census like every other box.
   | `sort`   | `fixed` | row order — `fixed` (tracked order, stable) or `rate` |
   | `products` | `mekanism:sulfuric_acid,mekanism:hydrogen_chloride` | registry ids that count as **END PRODUCTS**; the rest are **FEEDSTOCK** |
   | `prodtitle` / `feedtitle` | `END PRODUCTS` / `FEEDSTOCK` | section header text |
-  | `near`   | `1` | a chemical at/below this many **Buckets** is flagged `LOW` |
+  | `near`   | `1` | a chemical at/below this many **Buckets** gets a `BEHIND`/`TIGHT` verdict |
   | `stale`  | `10` | seconds of silence before `NO SIGNAL` |
 
   Rows are split into **END PRODUCTS** (what you want out — sulfuric acid,
@@ -143,6 +143,16 @@ it. Everything joins `update-all` and the console census like every other box.
   The net rate is a **least-squares slope** over `CHEM_WINDOW` seconds (20 by
   default, in `mesensor.lua`), not a raw last-minus-first — so a buffer that
   merely cycles (production keeping up with demand) reads ~0 instead of spiking.
+
+  For a chemical sitting at ~empty (just-in-time / autocrafted, stored ~0) the
+  tiny net rate is near-meaningless, so the wall shows a **verdict** instead:
+  `BEHIND` (net < 0 — production can't keep up, the bottleneck) or `TIGHT`
+  (net ~ 0 — keeping up exactly, no buffer). **Gross** production/consumption
+  rates are *not* available: the ME network only exposes stored *amount* (Δ =
+  net), and Mekanism does not expose a Pressurized Tube's flow rate to
+  ComputerCraft (only `getBuffer`, which reads 0 while flowing). The only place
+  the true rate is readable is a producing machine's `getProductionRate` /
+  `getProcessRate` — which needs a free face for a CC wired modem.
 
   The base telemetry wall (`fluxwall`) does **not** show the `chem` source —
   chemicals live only on this dedicated wall.

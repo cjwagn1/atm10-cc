@@ -6,11 +6,13 @@ balance. Subscribes to the telemetry mesh and renders whatever the chemical
 sensor (mesensor, on the AE computer) publishes as source "chem": one row per
 chemical, biggest text that still fits.
 
-Each row: name | stored amount | NET rate of change (mB/t, signed) | trend.
+Each row: name | stored amount (Buckets) | NET rate of change (mB/t) | trend.
   green  rate >= 0   producing >= consuming (surplus / balanced-up)
   red    rate <  0   falling behind - that chemical is a bottleneck, add makers
   yellow rate ~ 0    holding steady (see the storage line to read which kind)
-A chemical stuck near empty is flagged LOW so a starved bottleneck is obvious.
+A chemical stuck near empty gets a verdict (the tiny net rate alone is useless):
+  BEHIND  net < 0 at ~empty -> production can't keep up; THE bottleneck to fix
+  TIGHT   net ~ 0 at ~empty -> keeping up exactly, but no buffer/safety margin
 
 Because AE pools chemicals across cells (no clean per-chemical fill %), the
 header shows the pooled chemical-cell storage (used/total bytes, % full). That
@@ -34,7 +36,7 @@ Usage: chemwall [key=value ...]
   products=a,b     registry ids that count as END PRODUCTS (the rest are FEEDSTOCK)
   prodtitle=...    END PRODUCTS section header text
   feedtitle=...    FEEDSTOCK section header text
-  near=1           a chemical at/below this many Buckets is flagged LOW
+  near=1           a chemical at/below this many Buckets gets a BEHIND/TIGHT verdict
   stale=10         seconds of silence before NO SIGNAL
 Config may also live in chemwall.conf, one key=value per line.
 ]]
@@ -355,15 +357,24 @@ local function renderTarget(t, isTerm)
     local label = tostring(c.label or c.id or "?")
     if #label > labelW then label = label:sub(1, labelW) end
     label = label .. (" "):rep(labelW - #label)
+    local r = type(c.rate) == "number" and c.rate or nil
     local low = type(c.amount) == "number" and c.amount <= NEAR_ZERO
-    local rateStr = type(c.rate) == "number"
-      and ("%s%s/t"):format(c.rate >= 0 and "+" or "", fmt(c.rate)) or "--"
+    -- for an empty/low chemical the tiny net rate means little on its own, so
+    -- translate it into a verdict: BEHIND (production can't keep up - the
+    -- bottleneck), TIGHT (keeping up exactly, no buffer); a low chemical that's
+    -- climbing (rate > 0) is refilling and needs no flag
+    local flag, fcol
+    if low then
+      if r and r < -RATE_EPS then flag, fcol = " BEHIND", col("red")
+      elseif not r or math.abs(r) <= RATE_EPS then flag, fcol = " TIGHT", col("orange") end
+    end
+    local rateStr = r and ("%s%s/t"):format(r >= 0 and "+" or "", fmt(r)) or "--"
     drawLine(y, row(
-      seg(label, low and col("orange") or col("white")),
+      seg(label, fcol or col("white")),
       seg(" " .. fmtAmt(c.amount), col("white")),
       seg(" " .. trendGlyph(c.rate), rateColor(c.rate)),
       seg(rateStr, rateColor(c.rate)),
-      low and seg(" LOW", col("orange")) or nil))
+      flag and seg(flag, fcol) or nil))
   end
 
   -- start right under the header/cells line; reserve the bottom row for the footer

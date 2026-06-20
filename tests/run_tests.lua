@@ -884,15 +884,16 @@ T("chemwall: shows NO SIGNAL when the sensor goes quiet", function()
   expectContains(env:monitorText("monitor_2"), "NO SIGNAL", "stale banner")
 end)
 
-T("chemwall: flags a chemical stuck near empty and shows pooled cell fill %", function()
+T("chemwall: empty chemical gets a verdict - BEHIND (deficit) or TIGHT (balanced)", function()
   local env = CC.new{ termW = 51, termH = 19 }
   env:addModem("top")
   env:addMonitor("monitor_2", { baseW = 60, baseH = 30 })
   local pkt = chemPacket({
     usedBytes = 240 * 1048576, totalBytes = 256 * 1048576,  -- ~94% full
     chems = {
-      { id = "mekanism:oxygen",   label = "Oxygen",   amount = 5000000, rate = 80 },
-      { id = "mekanism:chlorine", label = "Chlorine", amount = 200,     rate = 0 }, -- starved
+      { id = "mekanism:oxygen",         label = "Oxygen",         amount = 5000000, rate = 80 },
+      { id = "mekanism:chlorine",       label = "Chlorine",       amount = 200,     rate = -30 }, -- can't keep up
+      { id = "mekanism:sulfur_dioxide", label = "Sulfur Dioxide", amount = 150,     rate = 0 },   -- keeping up, no margin
     },
   })
   env:rednetAt(1.0, 7, pkt, "telemetry")
@@ -900,7 +901,8 @@ T("chemwall: flags a chemical stuck near empty and shows pooled cell fill %", fu
   current = env
   env:run("programs/chemwall.lua", {}, { maxTime = 3 })
   local m = env:monitorText("monitor_2")
-  expectContains(m, "LOW", "near-empty chemical flagged as a bottleneck")
+  expectContains(m, "BEHIND", "deficit-at-empty chemical flagged BEHIND")
+  expectContains(m, "TIGHT", "balanced-at-empty chemical flagged TIGHT")
   expectContains(m, "% full", "pooled chemical-cell fill shown")
 end)
 
