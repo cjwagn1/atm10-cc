@@ -980,6 +980,21 @@ T("wall: the BASE telemetry wall hides the chem source (it has its own wall)", f
   expectNotContains(m, "CHEM", "chem is kept off the base telemetry wall")
 end)
 
+T("mekdump: lists an attached machine and reads its rate methods", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addPeripheral("reaction_chamber_0", { "pressurized_reaction_chamber" }, {
+    getProductionRate = function() return 1200 end,
+    getBuffer = function() return { name = "mekanism:hydrogen_chloride", amount = 50 } end,
+    isActive = function() return true end,
+  })
+  current = env
+  env:run("programs/mekdump.lua", {}, { maxTime = 2 })
+  local t = env:termText()
+  expectContains(t, "reaction_chamber_0", "lists the attached machine")
+  expectContains(t, "getProductionRate", "lists the rate method")
+  expectContains(t, "1200", "calls the rate method and shows its value")
+end)
+
 -- -------------------------------------------------------------- historian
 
 T("historian: persists telemetry rings to disk", function()

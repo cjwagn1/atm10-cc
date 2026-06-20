@@ -3,7 +3,7 @@
 -- listed below. Bump `version` whenever programs change; in-game
 -- computers pick it up with a single `update`.
 return {
-  version = 27,
+  version = 28,
   files = {
     { path = "chemwall",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/chemwall.lua" },
@@ -21,6 +21,8 @@ return {
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/historian.lua" },
     { path = "fluxprobe",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/fluxprobe.lua" },
+    { path = "mekdump",
+      url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/mekdump.lua" },
     { path = "update",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/update.lua" },
     { path = "update-all",
