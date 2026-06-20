@@ -21,14 +21,16 @@ Run it on the computer wired to your empty chemical monitor (+ a wireless/ender
 modem to hear the sensor). Press q to quit.
 
 Rows are split into two groups - END PRODUCTS (the chemicals you want out in
-useful form) and FEEDSTOCK (the creation chemicals used to make them) - and each
-group is sorted by net rate, highest surplus first. Amounts show in Buckets (B)
-to match Mekanism.
+useful form) and FEEDSTOCK (the creation chemicals used to make them). Order is
+FIXED by default so rows stay put as rates swing (just-in-time chemicals that
+cycle empty<->full would otherwise reorder constantly). Amounts show in Buckets
+(B) to match Mekanism.
 
 Usage: chemwall [key=value ...]
   source=chem      mesh source to render
   title=...        header title
   unit=B|mB        amount unit (default B = Buckets, matching the game)
+  sort=fixed|rate  row order: fixed/tracked (default, stable) or by net rate
   products=a,b     registry ids that count as END PRODUCTS (the rest are FEEDSTOCK)
   prodtitle=...    END PRODUCTS section header text
   feedtitle=...    FEEDSTOCK section header text
@@ -44,7 +46,7 @@ local CTL_TOKEN    = "flux"
 -- ------------------------------------------------------------------- config
 
 local cfg = { source = "chem", title = "CHEMICAL BALANCE",
-  near = 1, stale = 10, unit = "B",
+  near = 1, stale = 10, unit = "B", sort = "fixed",
   -- the end products (what you want OUT in useful form); everything else is a
   -- creation/feedstock chemical used to make them. They render in two groups.
   products = "mekanism:sulfuric_acid,mekanism:hydrogen_chloride",
@@ -56,6 +58,7 @@ local function applyKV(k, v)
   elseif k == "near" then cfg.near = tonumber(v) or cfg.near
   elseif k == "stale" then cfg.stale = tonumber(v) or cfg.stale
   elseif k == "unit" then cfg.unit = v
+  elseif k == "sort" then cfg.sort = v
   elseif k == "products" then cfg.products = v
   elseif k == "prodtitle" then cfg.prodtitle = v
   elseif k == "feedtitle" then cfg.feedtitle = v end
@@ -323,20 +326,24 @@ local function renderTarget(t, isTerm)
   end
 
   -- split into key END PRODUCTS (what you want OUT) vs FEEDSTOCK/creation
-  -- chemicals, and sort each group by net rate (biggest surplus first), so the
-  -- read is grouped and ordered instead of one messy list
+  -- chemicals. Order is FIXED (the tracked order) by default, so rows stay put
+  -- as rates swing - just-in-time chemicals that cycle empty<->full would
+  -- otherwise reorder constantly and be impossible to read. sort=rate opts into
+  -- ordering each group by net rate instead.
   local chems = chemList(latest)
   local prods, feed = {}, {}
   for _, c in ipairs(chems) do
     if productSet[c.id] then prods[#prods + 1] = c else feed[#feed + 1] = c end
   end
-  local function byRate(a, b)
-    local ra = type(a.rate) == "number" and a.rate or -math.huge
-    local rb = type(b.rate) == "number" and b.rate or -math.huge
-    return ra > rb
+  if cfg.sort == "rate" then
+    local function byRate(a, b)
+      local ra = type(a.rate) == "number" and a.rate or -math.huge
+      local rb = type(b.rate) == "number" and b.rate or -math.huge
+      return ra > rb
+    end
+    table.sort(prods, byRate)
+    table.sort(feed, byRate)
   end
-  table.sort(prods, byRate)
-  table.sort(feed, byRate)
 
   local labelW = 6
   for _, c in ipairs(chems) do

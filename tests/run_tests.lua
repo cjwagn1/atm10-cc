@@ -840,7 +840,7 @@ T("chemwall: shows every tracked chemical with amount and signed rate", function
   expectContains(m, "-45", "chlorine deficit rate")
 end)
 
-T("chemwall: groups end products above feedstock, each sorted by net rate", function()
+T("chemwall: groups end products above feedstock in a stable (fixed) order", function()
   local env = CC.new{ termW = 51, termH = 19 }
   env:addModem("top")
   env:addMonitor("monitor_2", { baseW = 70, baseH = 30 })
@@ -854,9 +854,24 @@ T("chemwall: groups end products above feedstock, each sorted by net rate", func
   -- an end product (Sulfuric Acid) renders above any feedstock (Oxygen)
   local pi, fi = m:find("Sulfuric Acid", 1, true), m:find("Oxygen", 1, true)
   if not (pi and fi and pi < fi) then fail("end products should sit above feedstock") end
-  -- within feedstock, higher net rate sorts first: Oxygen (+120) before Chlorine (-45)
-  local oi, ci = m:find("Oxygen", 1, true), m:find("Chlorine", 1, true)
-  if not (oi and ci and oi < ci) then fail("feedstock not sorted by rate") end
+  -- DEFAULT order is the tracked order, NOT by rate, so rows don't jump as
+  -- rates swing: Chlorine (-45) stays above Sulfur Trioxide (+3)
+  local ci, si = m:find("Chlorine", 1, true), m:find("Sulfur Trioxide", 1, true)
+  if not (ci and si and ci < si) then fail("default order should be fixed/tracked, not rate") end
+end)
+
+T("chemwall: sort=rate orders each group by net rate (opt-in)", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 70, baseH = 30 })
+  env:rednetAt(1.0, 7, chemPacket(), "telemetry")
+  env:rednetAt(2.0, 7, chemPacket(), "telemetry")
+  current = env
+  env:run("programs/chemwall.lua", { "sort=rate" }, { maxTime = 3 })
+  local m = env:monitorText("monitor_2")
+  -- by rate descending, Sulfur Trioxide (+3) now outranks Chlorine (-45)
+  local si, ci = m:find("Sulfur Trioxide", 1, true), m:find("Chlorine", 1, true)
+  if not (si and ci and si < ci) then fail("sort=rate did not order by net rate") end
 end)
 
 T("chemwall: shows NO SIGNAL when the sensor goes quiet", function()

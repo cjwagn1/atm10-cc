@@ -24,7 +24,7 @@ local SOURCE = args[1] or "me"
 -- it). Net rate = change in stored amount over CHEM_WINDOW seconds, in mB/t;
 -- a chemical absent from the network reads 0. Edit TRACK to change the set.
 local CHEM_SOURCE = "chem"
-local CHEM_WINDOW = 10
+local CHEM_WINDOW = 20   -- seconds averaged for each chemical's net rate
 local TRACK = {
   "mekanism:oxygen",
   "mekanism:hydrogen",
@@ -109,11 +109,23 @@ local function pushChemRate(id, amount, now)
   if not w then w = {}; chemWindows[id] = w end
   w[#w + 1] = { t = now, c = amount }
   while #w > 1 and w[1].t < now - CHEM_WINDOW do table.remove(w, 1) end
-  local first, last = w[1], w[#w]
-  if #w >= 2 and last.t > first.t then
-    return (last.c - first.c) / ((last.t - first.t) * 20)
+  local n = #w
+  if n < 2 then return nil end
+  -- least-squares slope of stored amount vs time, NOT a raw last-minus-first:
+  -- just-in-time chemicals cycle full<->empty constantly, and an endpoint
+  -- difference would spike whenever a sample lands on a peak or a trough. The
+  -- regression slope averages the whole window, so a buffer that merely cycles
+  -- (production keeping up with demand) reads ~0, while a real trend shows
+  -- through. t is relative to the first sample to keep the sums small.
+  local t0 = w[1].t
+  local st, sc, stc, stt = 0, 0, 0, 0
+  for _, s in ipairs(w) do
+    local t = s.t - t0
+    st = st + t; sc = sc + s.c; stc = stc + t * s.c; stt = stt + t * t
   end
-  return nil
+  local denom = n * stt - st * st
+  if denom == 0 then return nil end
+  return ((n * stc - st * sc) / denom) / 20   -- slope (mB/s) -> mB/t
 end
 
 -- publish source "chem": the seven tracked chemicals with amount + net rate,
