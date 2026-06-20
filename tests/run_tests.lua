@@ -929,6 +929,22 @@ T("chemwall: answers a version-census ping (joins the fleet roll-call)", functio
   if tostring(reply.version) ~= "24" then fail("version = " .. tostring(reply.version)) end
 end)
 
+T("wall: the BASE telemetry wall hides the chem source (it has its own wall)", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 50, baseH = 24 })
+  local flux = { v = 1, source = "flux",
+    data = { trueE = 2952790016, trueCap = 281474976710656, rate = 0 } }
+  env:rednetAt(1.0, 7, flux, "telemetry")
+  env:rednetAt(1.5, 8, chemPacket(), "telemetry")   -- mesensor also emits chem
+  env:rednetAt(2.0, 7, flux, "telemetry")
+  current = env
+  env:run(WALL, {}, { maxTime = 3 })
+  local m = env:monitorText("monitor_2")
+  expectContains(m, "FLUX", "flux still shows on the base wall")
+  expectNotContains(m, "CHEM", "chem is kept off the base telemetry wall")
+end)
+
 -- -------------------------------------------------------------- historian
 
 T("historian: persists telemetry rings to disk", function()

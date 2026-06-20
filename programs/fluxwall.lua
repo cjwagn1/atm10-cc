@@ -52,8 +52,14 @@ do
   end
 end
 
+-- the chemical balance has its own dedicated wall (chemwall); it does NOT
+-- belong on the base telemetry wall, so hide it here unless a sources= filter
+-- explicitly asks for it
+local HIDE_BY_DEFAULT = { chem = true }
+
 local function passesFilter(name)
-  if not sourceFilter or name == "alerts" then return true end
+  if name == "alerts" then return true end          -- alerts always pass
+  if not sourceFilter then return not HIDE_BY_DEFAULT[name] end
   for _, p in ipairs(sourceFilter) do
     if p == "*" or p == name then return true end
     local prefix = p:match("^(.*)%*$")
