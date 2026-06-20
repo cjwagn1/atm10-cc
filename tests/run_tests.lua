@@ -622,8 +622,12 @@ T("mesh: mesensor broadcasts ME storage envelopes", function()
   if #env.rednetSent < 2 then
     fail("expected >=2 broadcasts, got " .. #env.rednetSent)
   end
-  local m = env.rednetSent[#env.rednetSent].message
-  if m.source ~= "me" then fail("source = " .. tostring(m.source)) end
+  -- mesensor now publishes two sources ("me" and "chem"); find the me one
+  local m
+  for _, s in ipairs(env.rednetSent) do
+    if type(s.message) == "table" and s.message.source == "me" then m = s.message end
+  end
+  if not m then fail("no me-source broadcast") end
   if m.data.usedBytes ~= 612000 then
     fail("usedBytes = " .. tostring(m.data.usedBytes))
   end
@@ -631,6 +635,298 @@ T("mesh: mesensor broadcasts ME storage envelopes", function()
     fail(("cpus=%s busy=%s"):format(tostring(m.data.cpus),
       tostring(m.data.cpusBusy)))
   end
+end)
+
+-- -------------------------------------------------------------- chemicals
+-- The chemical-production monitor. mesensor (the AE-data computer that already
+-- has the ME Bridge) ALSO reads the seven tracked Mekanism chemicals off that
+-- same bridge and publishes them as source "chem"; chemwall renders one row per
+-- chemical with the net rate of change (mB/t) so a bottleneck is obvious.
+
+-- the last telemetry packet broadcast for a given source (mesensor now emits
+-- both "me" and "chem", so tests pick the source they mean)
+local function lastSource(env, src)
+  local m
+  for _, s in ipairs(env.rednetSent) do
+    if s.protocol == "telemetry" and type(s.message) == "table"
+      and s.message.source == src then m = s.message end
+  end
+  return m
+end
+
+-- A realistic ME-network snapshot of the seven tracked chemicals (amounts in
+-- mB). Tests override count/ratePerSec per scenario. `ratePerSec` (mB/s, may be
+-- negative) evolves a chemical's stored amount over virtual time so the sensor
+-- can measure a net rate.
+local function chemBridge(over)
+  over = over or {}
+  return {
+    stored = 1200000, max = 6400000, usage = 96.4, input = 130,
+    totalChemicalStorage = over.totalChemicalStorage or (256 * 1048576),
+    usedChemicalStorage = over.usedChemicalStorage or (64 * 1048576),
+    chemicals = over.chemicals or {
+      { name = "mekanism:oxygen",            displayName = "Oxygen",            count = 5000000 },
+      { name = "mekanism:hydrogen",          displayName = "Hydrogen",          count = 3200000 },
+      { name = "mekanism:chlorine",          displayName = "Chlorine",          count = 120000 },
+      { name = "mekanism:hydrogen_chloride", displayName = "Hydrogen Chloride", count = 800000 },
+      { name = "mekanism:sulfur_dioxide",    displayName = "Sulfur Dioxide",    count = 64000 },
+      { name = "mekanism:sulfur_trioxide",   displayName = "Sulfur Trioxide",   count = 250000 },
+      { name = "mekanism:sulfuric_acid",     displayName = "Sulfuric Acid",     count = 1500000 },
+    },
+  }
+end
+
+T("chem: mesensor broadcasts a chemical-balance envelope for all seven", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  env:addMeBridge("me_bridge_0", chemBridge())
+  current = env
+  env:run("programs/mesensor.lua", {}, { maxTime = 5.5 })
+  if #env.rednetSent < 2 then
+    fail("expected >=2 broadcasts, got " .. #env.rednetSent)
+  end
+  local m = lastSource(env, "chem")
+  if not m then fail("mesensor published no chem source") end
+  if type(m.data.chems) ~= "table" then fail("data.chems missing") end
+  if #m.data.chems ~= 7 then
+    fail("expected 7 chems, got " .. tostring(#m.data.chems))
+  end
+  local by = {}
+  for _, c in ipairs(m.data.chems) do by[c.id] = c end
+  if not by["mekanism:oxygen"] then fail("oxygen not tracked") end
+  if by["mekanism:oxygen"].amount ~= 5000000 then
+    fail("oxygen amount = " .. tostring(by["mekanism:oxygen"].amount))
+  end
+  if by["mekanism:oxygen"].label ~= "Oxygen" then
+    fail("oxygen label = " .. tostring(by["mekanism:oxygen"].label))
+  end
+  if not by["mekanism:sulfuric_acid"] then fail("sulfuric acid not tracked") end
+end)
+
+T("chem: net rate is signed right - surplus +, deficit -, balanced ~0", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  env:addMeBridge("me_bridge_0", chemBridge({
+    chemicals = {
+      -- producing: +2000 mB/s -> +100 mB/t
+      { name = "mekanism:oxygen",   displayName = "Oxygen",   count = 5000000, ratePerSec = 2000 },
+      -- steady: 0 mB/t (balanced)
+      { name = "mekanism:hydrogen", displayName = "Hydrogen", count = 3000000 },
+      -- draining: -1000 mB/s -> -50 mB/t
+      { name = "mekanism:chlorine", displayName = "Chlorine", count = 2000000, ratePerSec = -1000 },
+    },
+  }))
+  current = env
+  env:run("programs/mesensor.lua", {}, { maxTime = 13 })
+  local m = lastSource(env, "chem")
+  local by = {}
+  for _, c in ipairs(m.data.chems) do by[c.id] = c end
+  local ox, h2, cl = by["mekanism:oxygen"], by["mekanism:hydrogen"], by["mekanism:chlorine"]
+  if type(ox.rate) ~= "number" or ox.rate <= 0 then
+    fail("oxygen (producing) rate should be > 0, got " .. tostring(ox.rate))
+  end
+  if ox.rate < 80 or ox.rate > 120 then
+    fail("oxygen rate ~+100 mB/t expected, got " .. tostring(ox.rate))
+  end
+  if type(cl.rate) ~= "number" or cl.rate >= 0 then
+    fail("chlorine (draining) rate should be < 0, got " .. tostring(cl.rate))
+  end
+  if math.abs(h2.rate) > 1 then
+    fail("hydrogen (steady) rate should be ~0, got " .. tostring(h2.rate))
+  end
+end)
+
+T("chem: absent chemical reads 0 (never errors), big amounts survive un-clamped", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  -- only two chemicals present; one parked WAY past the 32-bit FE clamp ceiling
+  env:addMeBridge("me_bridge_0", chemBridge({
+    chemicals = {
+      { name = "mekanism:hydrogen", displayName = "Hydrogen", count = 9000000000 }, -- 9 G mB
+      { name = "mekanism:oxygen",   displayName = "Oxygen",   count = 1240000 },
+    },
+  }))
+  current = env
+  env:run("programs/mesensor.lua", {}, { maxTime = 4.5 })
+  local m = lastSource(env, "chem")
+  local by = {}
+  for _, c in ipairs(m.data.chems) do by[c.id] = c end
+  if #m.data.chems ~= 7 then fail("all seven tracked even when absent") end
+  -- absent -> 0, with a prettified label, no crash
+  local cl = by["mekanism:chlorine"]
+  if cl.amount ~= 0 then fail("absent chlorine should read 0, got " .. tostring(cl.amount)) end
+  if cl.label ~= "Chlorine" then fail("prettified label expected, got " .. tostring(cl.label)) end
+  -- 9 G mB is far past INT_MAX (2.1 G); must NOT clamp
+  if by["mekanism:hydrogen"].amount ~= 9000000000 then
+    fail("hydrogen 9G mB clamped to " .. tostring(by["mekanism:hydrogen"].amount))
+  end
+end)
+
+T("chem: survives an ME Bridge that vanishes (no crash, no bad reads)", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  env:addMeBridge("me_bridge_0", chemBridge())
+  env:detachAt(3, "me_bridge_0")
+  current = env
+  local res = env:run("programs/mesensor.lua", {}, { maxTime = 7 })
+  -- it must keep running (not error out) through the detach
+  if res and res.err then fail("mesensor errored on bridge loss: " .. tostring(res.err)) end
+  if #env.rednetSent < 1 then fail("expected at least one pre-detach broadcast") end
+end)
+
+T("chem: mesensor still publishes its me storage envelope alongside chem", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  local b = chemBridge()
+  b.totalItemStorage = 2100000; b.usedItemStorage = 612000
+  env:addMeBridge("me_bridge_0", b)
+  current = env
+  env:run("programs/mesensor.lua", {}, { maxTime = 5.5 })
+  local me, chem = lastSource(env, "me"), lastSource(env, "chem")
+  if not me then fail("me source dropped after folding chem in") end
+  if me.data.usedBytes ~= 612000 then fail("me usedBytes = " .. tostring(me.data.usedBytes)) end
+  if not chem then fail("chem source missing") end
+end)
+
+T("chem: a failed getChemicals read publishes no junk zeros (me still flows)", function()
+  -- transient AE error / Applied Mekanistics not loaded: getChemicals returns
+  -- nil. mesensor must NOT broadcast a screen of fabricated 0-amount chems
+  -- (which would spike huge fake deficits), but its me telemetry must continue.
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("back")
+  local b = chemBridge()
+  b.chemicalsBroken = true
+  env:addMeBridge("me_bridge_0", b)
+  current = env
+  env:run("programs/mesensor.lua", {}, { maxTime = 5.5 })
+  if lastSource(env, "chem") then fail("published a chem source despite a failed read") end
+  if not lastSource(env, "me") then fail("me source should still flow") end
+end)
+
+-- chemwall display: a "chem" telemetry packet carrying all seven chemicals,
+-- with the production picture varied per scenario.
+local function chemPacket(over)
+  over = over or {}
+  return { v = 1, source = "chem", tick = 0, data = {
+    up = over.up or 42,
+    usedBytes = over.usedBytes or (64 * 1048576),
+    totalBytes = over.totalBytes or (256 * 1048576),
+    chems = over.chems or {
+      { id = "mekanism:oxygen",            label = "Oxygen",            amount = 5000000, rate = 120 },
+      { id = "mekanism:hydrogen",          label = "Hydrogen",          amount = 3200000, rate = 0 },
+      { id = "mekanism:chlorine",          label = "Chlorine",          amount = 120000,  rate = -45 },
+      { id = "mekanism:hydrogen_chloride", label = "Hydrogen Chloride", amount = 800000,  rate = 12 },
+      { id = "mekanism:sulfur_dioxide",    label = "Sulfur Dioxide",    amount = 64000,   rate = -8 },
+      { id = "mekanism:sulfur_trioxide",   label = "Sulfur Trioxide",   amount = 250000,  rate = 3 },
+      { id = "mekanism:sulfuric_acid",     label = "Sulfuric Acid",     amount = 1500000, rate = 60 },
+    },
+  } }
+end
+
+T("chemwall: shows every tracked chemical with amount and signed rate", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 60, baseH = 30 })
+  env:rednetAt(1.0, 7, chemPacket(), "telemetry")
+  env:rednetAt(2.0, 7, chemPacket(), "telemetry")
+  current = env
+  env:run("programs/chemwall.lua", {}, { maxTime = 3 })
+  local m = env:monitorText("monitor_2")
+  expectContains(m, "Oxygen", "oxygen label")
+  expectContains(m, "5.00M", "oxygen amount")
+  expectContains(m, "Sulfuric Acid", "seventh chemical shown")
+  expectContains(m, "+120", "oxygen surplus rate")
+  expectContains(m, "-45", "chlorine deficit rate")
+end)
+
+T("chemwall: shows NO SIGNAL when the sensor goes quiet", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 60, baseH = 30 })
+  env:rednetAt(1.0, 7, chemPacket(), "telemetry")  -- one packet, then silence
+  current = env
+  env:run("programs/chemwall.lua", {}, { maxTime = 15 })
+  expectContains(env:monitorText("monitor_2"), "NO SIGNAL", "stale banner")
+end)
+
+T("chemwall: flags a chemical stuck near empty and shows pooled cell fill %", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 60, baseH = 30 })
+  local pkt = chemPacket({
+    usedBytes = 240 * 1048576, totalBytes = 256 * 1048576,  -- ~94% full
+    chems = {
+      { id = "mekanism:oxygen",   label = "Oxygen",   amount = 5000000, rate = 80 },
+      { id = "mekanism:chlorine", label = "Chlorine", amount = 200,     rate = 0 }, -- starved
+    },
+  })
+  env:rednetAt(1.0, 7, pkt, "telemetry")
+  env:rednetAt(2.0, 7, pkt, "telemetry")
+  current = env
+  env:run("programs/chemwall.lua", {}, { maxTime = 3 })
+  local m = env:monitorText("monitor_2")
+  expectContains(m, "LOW", "near-empty chemical flagged as a bottleneck")
+  expectContains(m, "% full", "pooled chemical-cell fill shown")
+end)
+
+T("chemwall: auto-scales so all seven rows fit (fills the wall, clips nothing)", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 80, baseH = 24 })
+  env:rednetAt(1.0, 7, chemPacket(), "telemetry")
+  env:rednetAt(2.0, 7, chemPacket(), "telemetry")
+  current = env
+  env:run("programs/chemwall.lua", {}, { maxTime = 3 })
+  local m = env:monitorText("monitor_2")
+  for _, label in ipairs({ "Oxygen", "Chlorine", "Hydrogen Chloride",
+    "Sulfur Dioxide", "Sulfur Trioxide", "Sulfuric Acid" }) do
+    expectContains(m, label, "row for " .. label)
+  end
+  if env:monitorScale("monitor_2") >= 5 then
+    fail("did not scale down to fit all seven rows (would clip)")
+  end
+end)
+
+T("chemwall: empty network shows a waiting message, never crashes", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 50, baseH = 20 })
+  current = env
+  local res = env:run("programs/chemwall.lua", {}, { maxTime = 4 })
+  if res and res.err then fail("crashed with no telemetry: " .. tostring(res.err)) end
+  expectContains(env:monitorText("monitor_2"), "waiting", "waiting-for-telemetry message")
+end)
+
+T("chemwall: a malformed chem packet (chems not a list) does not crash it", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 50, baseH = 20 })
+  -- a spoofed/garbled packet: chems is a string, and a later good packet
+  env:rednetAt(1.0, 7, { v = 1, source = "chem", data = { chems = "oops" } }, "telemetry")
+  env:rednetAt(2.0, 7, chemPacket(), "telemetry")
+  current = env
+  local res = env:run("programs/chemwall.lua", {}, { maxTime = 4 })
+  if res and res.err then fail("crashed on malformed chems: " .. tostring(res.err)) end
+  -- and it recovers to render the good packet that followed
+  expectContains(env:monitorText("monitor_2"), "Oxygen", "recovered after bad packet")
+end)
+
+T("chemwall: answers a version-census ping (joins the fleet roll-call)", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 50, baseH = 20 })
+  env.files[".fluxversion"] = "24\n"
+  env:rednetAt(1.0, 9, { cmd = "version?", token = "flux" }, "basectl")
+  env:charAt(3.0, "q")
+  current = env
+  env:run("programs/chemwall.lua", {}, { maxTime = 6 })
+  local reply
+  for _, s in ipairs(env.rednetSent) do
+    if s.protocol == "basectl" and type(s.message) == "table"
+      and s.message.version ~= nil then reply = s.message end
+  end
+  if not reply then fail("no version reply broadcast") end
+  if tostring(reply.version) ~= "24" then fail("version = " .. tostring(reply.version)) end
 end)
 
 -- -------------------------------------------------------------- historian

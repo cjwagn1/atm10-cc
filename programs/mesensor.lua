@@ -18,6 +18,23 @@ local PROTOCOL = "telemetry"
 local args = { ... }
 local SOURCE = args[1] or "me"
 
+-- This AE computer already has the ME Bridge, so it also reads the seven
+-- tracked Mekanism chemicals off the same bridge and publishes their
+-- production balance as a SECOND telemetry source, "chem" (chemwall renders
+-- it). Net rate = change in stored amount over CHEM_WINDOW seconds, in mB/t;
+-- a chemical absent from the network reads 0. Edit TRACK to change the set.
+local CHEM_SOURCE = "chem"
+local CHEM_WINDOW = 10
+local TRACK = {
+  "mekanism:oxygen",
+  "mekanism:hydrogen",
+  "mekanism:chlorine",
+  "mekanism:hydrogen_chloride",
+  "mekanism:sulfur_dioxide",
+  "mekanism:sulfur_trioxide",
+  "mekanism:sulfuric_acid",
+}
+
 local function fmt(n)
   if type(n) ~= "number" then return "?" end
   local neg = n < 0
@@ -73,7 +90,72 @@ end
 
 local data = {}
 
+-- ------------------------------------------------------------- chemicals
+
+-- "mekanism:sulfur_dioxide" -> "Sulfur Dioxide" (fallback name when a chemical
+-- is absent from the network so the bridge gives us no displayName)
+local function prettify(id)
+  local base = tostring(id):gsub("^.-:", ""):gsub("_", " ")
+  if base == "" then return tostring(id) end
+  return (base:gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b:lower() end))
+end
+
+-- per-chemical sliding window of { t, c } samples feeding the net rate
+local chemWindows = {}
+local chemStarted
+
+local function pushChemRate(id, amount, now)
+  local w = chemWindows[id]
+  if not w then w = {}; chemWindows[id] = w end
+  w[#w + 1] = { t = now, c = amount }
+  while #w > 1 and w[1].t < now - CHEM_WINDOW do table.remove(w, 1) end
+  local first, last = w[1], w[#w]
+  if #w >= 2 and last.t > first.t then
+    return (last.c - first.c) / ((last.t - first.t) * 20)
+  end
+  return nil
+end
+
+-- publish source "chem": the seven tracked chemicals with amount + net rate,
+-- plus pooled chemical-cell storage (bytes). If the bridge read FAILS (errors,
+-- or returns a non-table because Applied Mekanistics isn't loaded), we skip the
+-- publish entirely rather than fabricate a screen of zeros and fake deficits.
+local function sampleChem()
+  if not bridge then return end
+  local ok, chems = pcall(bridge.getChemicals)
+  if not ok or type(chems) ~= "table" then return end
+
+  local present = {}
+  for _, c in ipairs(chems) do
+    if type(c) == "table" and type(c.name) == "string" then present[c.name] = c end
+  end
+
+  local now = os.clock()
+  chemStarted = chemStarted or now
+  local out = {}
+  for _, id in ipairs(TRACK) do
+    local c = present[id]
+    local amount = c and tonumber(c.count) or 0   -- absent -> 0, never an error
+    out[#out + 1] = {
+      id = id, label = (c and c.displayName) or prettify(id),
+      amount = amount, rate = pushChemRate(id, amount, now),
+    }
+  end
+
+  local okT, total = pcall(bridge.getTotalChemicalStorage)
+  local okU, used = pcall(bridge.getUsedChemicalStorage)
+  pcall(rednet.broadcast, { v = 1, source = CHEM_SOURCE, tick = now, data = {
+    chems = out,
+    totalBytes = okT and tonumber(total) or nil,
+    usedBytes = okU and tonumber(used) or nil,
+    up = now - chemStarted,
+  } }, PROTOCOL)
+end
+
 local function sample()
+  -- the bridge can vanish (chunk unload, broken cable, detach); the timer keeps
+  -- firing, so bail rather than index a nil bridge until it is re-found
+  if not bridge then return end
   local ok
   local used, total, avail, use, cpus
   ok, used = pcall(bridge.getUsedItemStorage)
@@ -98,6 +180,9 @@ local function sample()
 
   pcall(rednet.broadcast,
     { v = 1, source = SOURCE, tick = os.clock(), data = data }, PROTOCOL)
+
+  -- ...and the chemical balance off the same bridge, as source "chem"
+  sampleChem()
 end
 
 local function render()

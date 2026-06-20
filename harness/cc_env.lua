@@ -493,6 +493,34 @@ end
 -- energy methods return AE units (1 AE = 2 FE), usage/input are
 -- per-tick rolling averages from AE2's energy service.
 function Env:addMeBridge(name, o)
+  local env = self
+  -- Applied Mekanistics chemicals on the ME network. Shape verified against
+  -- vendor/AdvancedPeripherals AEApi.listChemicals -> LuaConverter
+  -- .chemicalStackToObject: each entry is { name="mekanism:oxygen",
+  -- count=<mB long>, displayName="Oxygen", ... }. The amount field is `count`,
+  -- a 64-bit long (NOT the 32-bit-clamped FE capability), so millions of mB
+  -- pass through intact. o.chemicals = { {name=, displayName=, count=,
+  -- ratePerSec=}, ... }; a chemical's ratePerSec (mB/s, may be negative for net
+  -- consumption) evolves its count over virtual time so a sensor can measure a
+  -- net rate of change. Counts clamp at >= 0 like a real buffer.
+  local function chemicalsNow()
+    local out = {}
+    for _, c in ipairs(o.chemicals or {}) do
+      local amt = c.count or 0
+      if c.ratePerSec then amt = amt + c.ratePerSec * env.ticks * TICK end
+      amt = math.floor(amt + 0.5)
+      -- AE2 purges zero-quantity keys, so a depleted chemical is ABSENT from
+      -- getChemicals(), not present with count 0 - mirror that here
+      if amt > 0 then
+        local copy = {}
+        for k, v in pairs(c) do copy[k] = v end
+        copy.ratePerSec = nil  -- not part of the AP return shape
+        copy.count = amt
+        out[#out + 1] = copy
+      end
+    end
+    return out
+  end
   return self:addPeripheral(name, { "me_bridge" }, {
     getStoredEnergy = function() return o.stored end,
     getEnergyCapacity = function() return o.max end,
@@ -507,6 +535,28 @@ function Env:addMeBridge(name, o)
     end,
     -- shape per AP AEApi.parseCraftingCPU: {storage, coProcessors, isBusy, name}
     getCraftingCPUs = function() return o.cpus or {} end,
+    -- list-all-chemicals; fresh deep copy each call (AE returns a snapshot).
+    -- o.chemicalsBroken simulates a transient read failure / Applied Mekanistics
+    -- not loaded: the real method then returns nil + an error string.
+    getChemicals = function()
+      if o.chemicalsBroken then return nil, "ADDON_NOT_LOADED" end
+      return chemicalsNow()
+    end,
+    getChemical = function(filter)
+      local want = type(filter) == "table"
+        and (filter.name or filter.fingerprint) or filter
+      for _, c in ipairs(chemicalsNow()) do
+        if c.name == want then return c end
+      end
+      return nil
+    end,
+    -- pooled chemical-cell storage in BYTES (AEApi.getTotalChemicalStorage
+    -- sums cell.getBytes()), not mB - mirrors item storage
+    getTotalChemicalStorage = function() return o.totalChemicalStorage or 0 end,
+    getUsedChemicalStorage = function() return o.usedChemicalStorage or 0 end,
+    getAvailableChemicalStorage = function()
+      return (o.totalChemicalStorage or 0) - (o.usedChemicalStorage or 0)
+    end,
   })
 end
 

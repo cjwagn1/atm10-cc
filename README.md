@@ -12,6 +12,7 @@ wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/instal
 wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua wall
 wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua historian
 wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua console
+wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua chemwall
 wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua sledctl
 wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/installer.lua sled
 ```
@@ -19,10 +20,11 @@ wget run https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/instal
 | role | put it on | needs attached |
 |------|-----------|----------------|
 | `dash`      | the flux/energy computer | Block Reader facing the ME Drive of flux cells (+ wireless/ender modem) |
-| `me`        | the AE-data computer | ME Bridge (+ modem) |
+| `me`        | the AE-data computer (also reads the chemicals) | ME Bridge (+ modem) |
 | `wall`      | a display computer | Advanced Monitor(s) (+ modem) |
 | `historian` | the always-on brain | Advanced Peripherals **Chat Box** (+ modem) |
 | `console`   | a wall panel near the AE terminal | Advanced (touch) Monitor (+ modem) |
+| `chemwall`  | the dedicated chemical monitor wall | Advanced Monitor(s) (+ modem) |
 | `sledctl`   | the sled fleet console | modem (+ `sledctl.conf` token) |
 | `sled`      | a mining turtle | see docs/SLED-RUNBOOK.md |
 
@@ -112,10 +114,11 @@ alert; a source that goes quiet shows `NO SIGNAL (Ns)` inline.
 | program     | role        | what it does |
 |-------------|-------------|--------------|
 | `fluxdash`  | `dash`      | Reads flux energy (true totals via Block Reader, clamped FE capability as fallback), renders a local dashboard on its terminal + adjacent monitors, publishes source `flux` |
-| `mesensor`  | `me`        | Reads an ME Bridge: item storage bytes, crafting CPU busy/total, AE grid draw; publishes source `me` |
+| `mesensor`  | `me`        | Reads an ME Bridge: item storage bytes, crafting CPU busy/total, AE grid draw (source `me`); **also** reads the seven tracked Mekanism chemicals off the same bridge, derives each one's net rate of change (mB/t), and publishes source `chem` |
 | `fluxwall`  | `wall`      | Display client: unified card view of every source heard on the mesh |
 | `historian` | `historian` | Records rolling history per source, evaluates alert rules, announces via Chat Box (in-game chat) + broadcasts source `alerts`; hosts the base-control hub (chat `update-all`, `[u]`, post-update ack roll-call) |
 | `console`   | `console`   | Touch panel: colored `UPDATE ALL` / `VERSIONS` / `UPDATE SLEDS` buttons + a version census shown on the monitor; auto-updates with the base |
+| `chemwall`  | `chemwall`  | Dedicated full-monitor chemical-balance wall: one auto-scaled row per chemical (name, stored amount, signed net rate colored green/red/yellow, trend + sparkline), pooled-cell fill %, and a `LOW` flag on any chemical starved near empty; subscribes to source `chem` |
 | `fluxprobe` | —           | Diagnostic: dumps whatever a Block Reader sees, sums every `fe_energy` value at any depth, saves `fluxdump.txt` |
 | `sled`      | `sled`      | **Project Sled**: a turtle that runs a self-relocating Digital Miner skid in the mining dimension; journaled write-ahead state survives chunk unloads at any instant; publishes source `sled<N>` (docs/SLED-DESIGN.md, docs/SLED-RUNBOOK.md) |
 | `sledctl`   | `sledctl`   | Fleet console: compact per-sled status table + token-gated fleet-wide `update` broadcast (separate `sledctl` channel) |
@@ -215,6 +218,7 @@ Current sources:
 |----------|-------------|
 | `flux`   | `trueE`, `trueCap`, `cells` (via block reader); `e`, `cap` (clamped capability fallback); `rate` (FE/t, smoothed 10s); `srcName`; `ae`, `aeMax`, `aeUse`, `aeIn` (ME Bridge AE-unit grid stats, 1 AE = 2 FE) |
 | `me`     | `usedBytes`, `totalBytes`, `availBytes` (item storage cells); `cpus`, `cpusBusy` (crafting CPUs); `aeUse` (AE/t) |
+| `chem`   | `chems` = list of `{ id, label, amount (mB), rate (mB/t, net) }` (one per tracked chemical); `usedBytes`, `totalBytes` (pooled chemical-cell storage); `up` (sensor uptime) |
 | `sled<N>`| `state` (MINING/RELOCATE/RECOVER), `step`, `pos` (string), `hops`, `fuel`, `targets`, `miner` (0/1), `rate` (measured blocks/s), `eta`, `jpt`, `err`, `warn` |
 | `alerts` | `msg` (historian-computed event; the wall shows it as a banner) |
 
