@@ -833,10 +833,30 @@ T("chemwall: shows every tracked chemical with amount and signed rate", function
   env:run("programs/chemwall.lua", {}, { maxTime = 3 })
   local m = env:monitorText("monitor_2")
   expectContains(m, "Oxygen", "oxygen label")
-  expectContains(m, "5.00M", "oxygen amount")
+  -- amount shown in Buckets (B) to match Mekanism: 5,000,000 mB = 5.00k B
+  expectContains(m, "5.00k B", "oxygen amount in buckets")
   expectContains(m, "Sulfuric Acid", "seventh chemical shown")
   expectContains(m, "+120", "oxygen surplus rate")
   expectContains(m, "-45", "chlorine deficit rate")
+end)
+
+T("chemwall: groups end products above feedstock, each sorted by net rate", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 70, baseH = 30 })
+  env:rednetAt(1.0, 7, chemPacket(), "telemetry")
+  env:rednetAt(2.0, 7, chemPacket(), "telemetry")
+  current = env
+  env:run("programs/chemwall.lua", {}, { maxTime = 3 })
+  local m = env:monitorText("monitor_2")
+  expectContains(m, "END PRODUCTS", "end-products section header")
+  expectContains(m, "FEEDSTOCK", "feedstock section header")
+  -- an end product (Sulfuric Acid) renders above any feedstock (Oxygen)
+  local pi, fi = m:find("Sulfuric Acid", 1, true), m:find("Oxygen", 1, true)
+  if not (pi and fi and pi < fi) then fail("end products should sit above feedstock") end
+  -- within feedstock, higher net rate sorts first: Oxygen (+120) before Chlorine (-45)
+  local oi, ci = m:find("Oxygen", 1, true), m:find("Chlorine", 1, true)
+  if not (oi and ci and oi < ci) then fail("feedstock not sorted by rate") end
 end)
 
 T("chemwall: shows NO SIGNAL when the sensor goes quiet", function()

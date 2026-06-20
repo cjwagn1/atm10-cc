@@ -20,11 +20,20 @@ back-pressure (good); ~0 with a chemical sitting near empty = starved (bad).
 Run it on the computer wired to your empty chemical monitor (+ a wireless/ender
 modem to hear the sensor). Press q to quit.
 
+Rows are split into two groups - END PRODUCTS (the chemicals you want out in
+useful form) and FEEDSTOCK (the creation chemicals used to make them) - and each
+group is sorted by net rate, highest surplus first. Amounts show in Buckets (B)
+to match Mekanism.
+
 Usage: chemwall [key=value ...]
-  source=chem     mesh source to render
-  title=...       header title
-  near=1000       a chemical at/below this many mB is flagged LOW (bottleneck)
-  stale=10        seconds of silence before NO SIGNAL
+  source=chem      mesh source to render
+  title=...        header title
+  unit=B|mB        amount unit (default B = Buckets, matching the game)
+  products=a,b     registry ids that count as END PRODUCTS (the rest are FEEDSTOCK)
+  prodtitle=...    END PRODUCTS section header text
+  feedtitle=...    FEEDSTOCK section header text
+  near=1           a chemical at/below this many Buckets is flagged LOW
+  stale=10         seconds of silence before NO SIGNAL
 Config may also live in chemwall.conf, one key=value per line.
 ]]
 
@@ -35,13 +44,21 @@ local CTL_TOKEN    = "flux"
 -- ------------------------------------------------------------------- config
 
 local cfg = { source = "chem", title = "CHEMICAL BALANCE",
-  near = 1000, stale = 10 }
+  near = 1, stale = 10, unit = "B",
+  -- the end products (what you want OUT in useful form); everything else is a
+  -- creation/feedstock chemical used to make them. They render in two groups.
+  products = "mekanism:sulfuric_acid,mekanism:hydrogen_chloride",
+  prodtitle = "END PRODUCTS", feedtitle = "FEEDSTOCK" }
 
 local function applyKV(k, v)
   if k == "source" then cfg.source = v
   elseif k == "title" then cfg.title = v
   elseif k == "near" then cfg.near = tonumber(v) or cfg.near
-  elseif k == "stale" then cfg.stale = tonumber(v) or cfg.stale end
+  elseif k == "stale" then cfg.stale = tonumber(v) or cfg.stale
+  elseif k == "unit" then cfg.unit = v
+  elseif k == "products" then cfg.products = v
+  elseif k == "prodtitle" then cfg.prodtitle = v
+  elseif k == "feedtitle" then cfg.feedtitle = v end
 end
 
 do
@@ -65,10 +82,14 @@ end
 
 local SOURCE      = cfg.source
 local STALE_AFTER = cfg.stale
-local NEAR_ZERO   = cfg.near
+local NEAR_ZERO   = cfg.near * 1000   -- cfg.near is in Buckets; data is in mB
 local RATE_EPS    = 0.5    -- |rate| below this reads as "holding" (yellow)
 local REFRESH     = 1
-local RING_MAX    = 80     -- per-chemical sparkline history
+local RING_MAX    = 80     -- per-chemical history
+
+-- the set of registry ids that count as end products
+local productSet = {}
+for id in (cfg.products or ""):gmatch("[^,%s]+") do productSet[id] = true end
 
 -- -------------------------------------------------------------- formatting
 
@@ -92,6 +113,14 @@ local function fmt(n)
   end
   if neg then s = "-" .. s end
   return s
+end
+
+-- stored amounts: Mekanism shows chemicals in Buckets (B), but the bridge (and
+-- mesensor) speak millibuckets, so divide by 1000 for display. unit=mB keeps mB.
+local function fmtAmt(mB)
+  if type(mB) ~= "number" then return "?" end
+  if cfg.unit == "mB" then return fmt(mB) .. " mB" end
+  return fmt(mB / 1000) .. " B"
 end
 
 local function fmtSpan(sec)
@@ -183,17 +212,18 @@ local MIN_W  = 22
 
 local mons = {}
 
--- the layout needs (title + cells line + one row per chemical + footer) lines
--- and a width that fits the longest "label amount rate" row. Pick the LARGEST
--- text scale that still shows all of it, so a 1-block or a 4x3 wall both fill.
+-- the layout needs (title + cells + 2 group headers + one row per chemical +
+-- footer) lines, and a width that fits the longest "label amount rate" row.
+-- Pick the LARGEST text scale that still shows all of it, so a 1-block or a 4x3
+-- wall both fill.
 local function needs()
   local chems = chemList(latest)
-  local rows = 3 + math.max(#chems, 1)             -- title, cells, footer + rows
+  local rows = 5 + math.max(#chems, 1)   -- title, cells, 2 headers, footer + rows
   local labelW = 6
   for _, c in ipairs(chems) do
     labelW = math.max(labelW, #tostring(c.label or c.id or ""))
   end
-  local w = math.max(MIN_W, labelW + 18)           -- label + amount + rate + gaps
+  local w = math.max(MIN_W, labelW + 20) -- label + amount(B) + rate + gaps
   return rows, w
 end
 
@@ -273,54 +303,74 @@ local function renderTarget(t, isTerm)
     return
   end
 
-  -- pooled chemical-cell storage (the rate~0 disambiguator)
+  -- pooled chemical-cell storage (the rate~0 disambiguator). AE reports 0 if
+  -- the chemicals aren't kept in dedicated chemical storage cells - then we
+  -- just skip this line rather than show a useless 0%.
   local used, total = latest.usedBytes, latest.totalBytes
+  local headRow = false
   if type(used) == "number" and type(total) == "number" and total > 0 then
     local pct = used / total * 100
-    -- percentage first so it survives the clip on a narrow monitor (it is the
-    -- signal that disambiguates a rate ~ 0); the byte detail trails it
     drawLine(2, row(seg("CELLS ", col("yellow")),
       seg(("%d%% full"):format(math.floor(pct + 0.5)),
         pct >= 95 and col("orange") or col("white")),
       seg("  " .. fmt(used) .. "/" .. fmt(total) .. " B", col("lightBlue"))))
+    headRow = true
   end
-
   if stale then
     local age = lastSeen and math.floor(os.clock() - lastSeen) or 0
     drawLine(2, row(seg(("NO SIGNAL (%ds)"):format(age), col("red"))))
+    headRow = true
   end
 
-  -- one row per chemical
+  -- split into key END PRODUCTS (what you want OUT) vs FEEDSTOCK/creation
+  -- chemicals, and sort each group by net rate (biggest surplus first), so the
+  -- read is grouped and ordered instead of one messy list
   local chems = chemList(latest)
+  local prods, feed = {}, {}
+  for _, c in ipairs(chems) do
+    if productSet[c.id] then prods[#prods + 1] = c else feed[#feed + 1] = c end
+  end
+  local function byRate(a, b)
+    local ra = type(a.rate) == "number" and a.rate or -math.huge
+    local rb = type(b.rate) == "number" and b.rate or -math.huge
+    return ra > rb
+  end
+  table.sort(prods, byRate)
+  table.sort(feed, byRate)
+
   local labelW = 6
   for _, c in ipairs(chems) do
     labelW = math.max(labelW, #tostring(c.label or c.id or ""))
   end
-  labelW = math.min(labelW, math.max(6, w - 14))
+  labelW = math.min(labelW, math.max(6, w - 16))
 
-  local top = 3
-  for i, c in ipairs(chems) do
-    local y = top + i - 1
+  local function drawChem(y, c)
     local label = tostring(c.label or c.id or "?")
     if #label > labelW then label = label:sub(1, labelW) end
     label = label .. (" "):rep(labelW - #label)
-    local amount = fmt(c.amount or 0)
     local low = type(c.amount) == "number" and c.amount <= NEAR_ZERO
-    local rateStr
-    if type(c.rate) == "number" then
-      rateStr = ("%s%s/t"):format(c.rate >= 0 and "+" or "", fmt(c.rate))
-    else
-      rateStr = "--"
-    end
-    local spark = sparkline(rings[c.id], math.max(0, w - labelW - 26))
+    local rateStr = type(c.rate) == "number"
+      and ("%s%s/t"):format(c.rate >= 0 and "+" or "", fmt(c.rate)) or "--"
     drawLine(y, row(
       seg(label, low and col("orange") or col("white")),
-      seg(" " .. amount, col("white")),
+      seg(" " .. fmtAmt(c.amount), col("white")),
       seg(" " .. trendGlyph(c.rate), rateColor(c.rate)),
       seg(rateStr, rateColor(c.rate)),
-      low and seg(" LOW", col("orange")) or nil,
-      spark and seg("  " .. spark, col("gray")) or nil))
+      low and seg(" LOW", col("orange")) or nil))
   end
+
+  -- start right under the header/cells line; reserve the bottom row for the footer
+  local y = headRow and 3 or 2
+  local function section(title, list)
+    if #list == 0 then return end
+    if y < h then drawLine(y, row(seg(title, col("cyan")))); y = y + 1 end
+    for _, c in ipairs(list) do
+      if y >= h then break end
+      drawChem(y, c); y = y + 1
+    end
+  end
+  section(cfg.prodtitle, prods)
+  section(cfg.feedtitle, feed)
 
   -- footer: freshness + uptime
   local foot = {}

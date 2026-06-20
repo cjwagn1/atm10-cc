@@ -126,8 +126,16 @@ it. Everything joins `update-all` and the console census like every other box.
   |-----|---------|---------|
   | `source` | `chem` | mesh source to render (matches `mesensor`) |
   | `title`  | `CHEMICAL BALANCE` | header title |
-  | `near`   | `1000` | a chemical at/below this many mB is flagged `LOW` |
+  | `unit`   | `B` | amount unit — `B` (Buckets, matching the game) or `mB` |
+  | `products` | `mekanism:sulfuric_acid,mekanism:hydrogen_chloride` | registry ids that count as **END PRODUCTS**; the rest are **FEEDSTOCK** |
+  | `prodtitle` / `feedtitle` | `END PRODUCTS` / `FEEDSTOCK` | section header text |
+  | `near`   | `1` | a chemical at/below this many **Buckets** is flagged `LOW` |
   | `stale`  | `10` | seconds of silence before `NO SIGNAL` |
+
+  Rows are split into **END PRODUCTS** (what you want out — sulfuric acid,
+  hydrogen chloride) and **FEEDSTOCK** (the creation chemicals), each sorted by
+  net rate, highest surplus first. The base telemetry wall (`fluxwall`) does
+  **not** show the `chem` source — chemicals live only on this dedicated wall.
 
 **Verify without Minecraft** — the headless emulator runs the real `mesensor`
 and `chemwall` end-to-end against a mock ME Bridge carrying all seven chemicals:
