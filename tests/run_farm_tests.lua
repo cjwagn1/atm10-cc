@@ -826,6 +826,38 @@ T("setup wizard: a missing ME Bridge fails without the turtle moving", function(
   eq(env.turtle.pos.y, 80, "did not move y")
 end)
 
+-- The stack must line up with the ground-floor plot grid: center each copy over
+-- a ground-floor ender chest (the harvest anchor), not at the arbitrary bbox
+-- corner. Here the signature bbox center (x5) is OFF the ender chest (x4), so an
+-- aligned build shifts the stack to center on the chest.
+T("setup wizard: centers the stack over a ground-floor ender chest", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "east", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  for dx = 0, 4 do
+    for dz = 0, 2 do
+      env:setBlock(3 + dx, 74, dz,
+        { id = "farmingforblockheads:fertilized_farmland_healthy" })
+    end
+  end
+  env:setBlock(4, 73, 1, { id = "enderstorage:ender_chest" }) -- below, off bbox center
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 0, craftSeconds = 1, items = { dirt, hoe, fert, coal } })
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 80000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "aligning the stack", "aligned to the ender chest")
+  -- centered over the chest at x4 -> build.x = 4 - floor(5/2) = 2 -> soil x2..6
+  eq(env:block(2, 75, 0) and env:block(2, 75, 0).id,
+    "farmingforblockheads:fertilized_farmland_healthy",
+    "aligned soil reaches the chest-centered x2")
+  eq(env:block(7, 75, 0), nil, "NOT at the un-aligned bbox-corner x7")
+end)
+
 T("reset: wipes config, blueprint, and journal back to first-run state", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "east", fuel = 100 } }

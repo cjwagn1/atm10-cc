@@ -435,6 +435,26 @@ end
 -- which way the plot shifted. Try up to 4 facings so a blocked step (e.g. the
 -- bridge in front) or an edge-of-range step just gets retried in another
 -- direction. I end back where I started, facing the direction I measured.
+-- Find the nearest ground-floor ender chest (the harvest anchor under each plot)
+-- in scan range, as a turtle-relative (world-aligned) offset. The stack is then
+-- centred over it instead of an arbitrary bbox corner, so copies line up with the
+-- existing plot grid below. nil if none in range (or no scanner).
+local function findEnderChest()
+  local blocks = scanBlocks()
+  if not blocks then return nil end
+  local best
+  for _, b in ipairs(blocks) do
+    if type(b.name) == "string" and b.name:find("ender", 1, true)
+      and b.name:find("chest", 1, true) then
+      local dist = math.abs(b.x) + math.abs(b.z)
+      if not best or dist < best.dist then
+        best = { x = b.x, y = b.y, z = b.z, dist = dist }
+      end
+    end
+  end
+  return best
+end
+
 local function calibrateHeading()
   local before = plotOffsetSet(scanBlocks())
   if next(before) == nil then return nil, "no plot to calibrate on" end
@@ -1441,12 +1461,21 @@ local function runWizard(plotCount)
     sup = { export_side = "up", suck = "down" }
   end
   plotCount = plotCount or DEFAULT_PLOTS
+  -- Align the stack over a ground-floor ender chest (the harvest anchor of each
+  -- plot) so copies sit centred over it - not at the arbitrary bbox corner.
+  local bx, bz = p.rx, p.rz
+  local anchor = findEnderChest()
+  if anchor then
+    bx = anchor.x - math.floor(p.w / 2)
+    bz = anchor.z - math.floor(p.d / 2)
+    print("farm: aligning the stack centred over an ender chest.")
+  end
   -- drop frame: turtle = (0,0,0); the plot + build column hang off it
   local gen = {
     start = { x = 0, y = 0, z = 0 }, start_heading = heading, heading = heading,
     origin = { x = p.rx, y = p.ry, z = p.rz },
     size = { w = p.w, h = p.h, d = p.d }, scan_y = p.ry + p.h + 1,
-    build = { x = p.rx, y = p.ry + p.h, z = p.rz }, plots = plotCount,
+    build = { x = bx, y = p.ry + p.h, z = bz }, plots = plotCount,
     travel_y = p.ry + p.h + plotCount * p.h + 4,
     base = { bridge = bridgeName, park = { x = 0, y = 0, z = 0 },
       suck = sup.suck, export_side = sup.export_side },
