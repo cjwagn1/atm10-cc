@@ -50,7 +50,7 @@ return {
     suck = "down", export_side = "up",
     scratch = { x = 47, y = 122, z = 50 },  -- self-test column (needs a floor)
     test_item = "minecraft:dirt",
-    craft_probe = "farmingforblockheads:fertilizer_rich",
+    craft_probe = "farmingforblockheads:red_fertilizer",
   },
   fleet = "farm1",           -- telemetry source name (fluxwall shows it)
   -- token = "...",          -- optional: override the basectl courtesy token

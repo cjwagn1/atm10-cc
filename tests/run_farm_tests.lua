@@ -354,14 +354,14 @@ end)
 T("me bridge: craftItem is async, raises observed stock + fires ae_crafting", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "east", fuel = 100 } }
-  local fert = { id = "farmingforblockheads:fertilizer_rich", count = 0,
+  local fert = { id = "farmingforblockheads:red_fertilizer", count = 0,
     isCraftable = true }
   env:addMeBridge("me", { stored = 1, max = 2, usage = 0, items = { fert },
     craftSeconds = 1 })
   env.files["prog.lua"] = [[
     local b = peripheral.wrap("me")
     local out = fs.open("out", "w")
-    local spec = { name = "farmingforblockheads:fertilizer_rich", count = 5 }
+    local spec = { name = "farmingforblockheads:red_fertilizer", count = 5 }
     out.writeLine("before=" .. tostring(b.getItem(spec).count))
     local job = b.craftItem(spec)
     out.writeLine("job=" .. tostring(job ~= nil))
@@ -687,7 +687,7 @@ local function selftestRig(opts)
     base = { bridge = "me", park = { x = 0, y = 126, z = -2 },
       staging = { x = 0, y = 125, z = -2 }, suck = "down", export_side = "up",
       scratch = { x = 6, y = 118, z = 0 },
-      test_item = %q, craft_probe = "farmingforblockheads:fertilizer_rich" },
+      test_item = %q, craft_probe = "farmingforblockheads:red_fertilizer" },
   }]]):format(opts.test_item or "minecraft:dirt")
   env:setBlock(6, 118, 0, { id = "minecraft:stone" }) -- scratch soil-column floor
   env:setBlock(7, 118, 0, { id = "minecraft:stone" }) -- scratch water-column floor

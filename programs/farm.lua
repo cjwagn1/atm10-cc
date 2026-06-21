@@ -69,7 +69,7 @@ local function loadConf()
   conf.items.dirt = conf.items.dirt or "minecraft:dirt"
   conf.items.hoe = conf.items.hoe or "minecraft:diamond_hoe"
   conf.items.fertilizer = conf.items.fertilizer
-    or "farmingforblockheads:fertilizer_rich"
+    or "farmingforblockheads:red_fertilizer"
   conf.items.water = conf.items.water or "minecraft:water_bucket"
   conf.items.fuel = conf.items.fuel or "minecraft:coal_block"
   conf.base = conf.base or {}

@@ -1160,8 +1160,8 @@ function Env:fertilizerItem(o)
   o = o or {}
   local env = self
   return {
-    id = o.id or "farmingforblockheads:fertilizer_rich", count = o.count or 1,
-    displayName = o.displayName or "Rich Fertilizer (Healthy)",
+    id = o.id or "farmingforblockheads:red_fertilizer", count = o.count or 1,
+    displayName = o.displayName or "Red Fertilizer (Healthy)",
     onUse = function(_, x, y, z, _dir, _s)
       local b = env.world[keyOf(x, y, z)]
       if not (b and b.id == FARMLAND) then return false, PLACE_FAIL end
