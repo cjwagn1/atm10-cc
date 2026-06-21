@@ -521,6 +521,31 @@ function Env:addMeBridge(name, o)
     end
     return out
   end
+  -- Crafting / export surface (AP MEBridgePeripheral, FARM-RESEARCH Q2).
+  -- o.items = list of stock STACKS { id, count, isCraftable, displayName,
+  -- onUse?/makeBlock?/cropId?/... }; a stack may carry the same behavior hooks
+  -- as a turtle inventory item, so a stack exported then sucked still tills /
+  -- fertilizes / plants. getItem returns a name/count/isCraftable view;
+  -- craftItem is ASYNC (schedules a stock bump after o.craftSeconds, then fires
+  -- "ae_crafting"); exportItem moves stock to env.ground at o.exportCell so
+  -- turtle.suck() collects it. All machine-sourced (no fake-player path).
+  local items = o.items or {}
+  local function findItem(filter)
+    local want = type(filter) == "table"
+      and (filter.name or filter.fingerprint) or filter
+    for _, s in ipairs(items) do
+      if s.id == want then return s end
+    end
+    return nil
+  end
+  local function itemView(s)
+    return { name = s.id, count = s.count or 0,
+      displayName = s.displayName or s.id,
+      isCraftable = s.isCraftable or false,
+      fingerprint = s.fingerprint or s.id }
+  end
+  local craftJobSeq = 0
+
   return self:addPeripheral(name, { "me_bridge" }, {
     getStoredEnergy = function() return o.stored end,
     getEnergyCapacity = function() return o.max end,
@@ -535,6 +560,59 @@ function Env:addMeBridge(name, o)
     end,
     -- shape per AP AEApi.parseCraftingCPU: {storage, coProcessors, isBusy, name}
     getCraftingCPUs = function() return o.cpus or {} end,
+    getItem = function(filter)
+      local s = findItem(filter)
+      return s and itemView(s) or nil
+    end,
+    getItems = function()
+      local out = {}
+      for _, s in ipairs(items) do out[#out + 1] = itemView(s) end
+      return out
+    end,
+    isCraftable = function(filter)
+      if type(filter) ~= "table" and type(filter) ~= "string" then
+        return false, "EMPTY_FILTER"
+      end
+      local s = findItem(filter)
+      return s ~= nil and s.isCraftable == true
+    end,
+    -- async (NOT mainThread): returns a job stub immediately; the requested
+    -- count materializes into stock after o.craftSeconds, then ae_crafting
+    -- fires. The count bump is scheduled FIRST so a poll woken by the event
+    -- already observes the raised stock (the builder gates on observed stock,
+    -- never on the job object — AM-2).
+    craftItem = function(filter)
+      local s = findItem(filter)
+      if not s or not s.isCraftable then return nil, "NOT_CRAFTABLE" end
+      local need = (type(filter) == "table" and filter.count) or 1
+      craftJobSeq = craftJobSeq + 1
+      local jobId = craftJobSeq
+      local at = env.ticks * TICK + (o.craftSeconds or 1)
+      env:scheduleAt(at, { fn = function() s.count = (s.count or 0) + need end })
+      env:scheduleAt(at, { ev = { "ae_crafting", false, jobId, "JOB_DONE" } })
+      return { getId = function() return jobId end,
+        isDone = function() return (s.count or 0) >= need end }
+    end,
+    -- exportItem(filter, side) -> count moved, or 0, "ERROR" (two-return). The
+    -- exported stack lands on env.ground at o.exportCell (the staging chest the
+    -- turtle sucks from), carrying its behavior hooks so a pulled stack still
+    -- places correctly.
+    exportItem = function(filter, _side)
+      local s = findItem(filter)
+      if not s or (s.count or 0) <= 0 then return 0, "ITEM_NOT_FOUND" end
+      if not o.exportCell then return 0, "INVENTORY_NOT_FOUND" end
+      local want = (type(filter) == "table" and filter.count) or 64
+      local n = math.min(want, s.count)
+      s.count = s.count - n
+      local c = o.exportCell
+      local key = keyOf(c.x, c.y, c.z)
+      local g = env.ground[key] or {}
+      g[#g + 1] = { id = s.id, count = n, components = s.components,
+        onUse = s.onUse, makeBlock = s.makeBlock, cropId = s.cropId,
+        displayName = s.displayName, damage = s.damage, maxDamage = s.maxDamage }
+      env.ground[key] = g
+      return n
+    end,
     -- list-all-chemicals; fresh deep copy each call (AE returns a snapshot).
     -- o.chemicalsBroken simulates a transient read failure / Applied Mekanistics
     -- not loaded: the real method then returns nil + an error string.
@@ -1029,6 +1107,119 @@ function Env:qeItem(o)
   }
 end
 
+-- ------------------------------------------- farm build item-use mocks (Q1)
+-- Inventory stacks that carry an onUse(env, x,y,z, dir, stack) hook;
+-- turtle.place() dispatches it (buildTurtleApi place()). Each re-derives the
+-- real game's gate against env.world and returns ok, err, consumed. Verified
+-- turtle-visible behavior from vendored CC/FfB/MA source (FARM-RESEARCH Q1,
+-- Q1-water): success returns true; a precondition miss returns false +
+-- "Cannot place item here", stack retained. The blocks they leave are the
+-- exact registry ids the scan distinguishes (FARM-RESEARCH Q3 table).
+
+local PLACE_FAIL = "Cannot place item here"
+local FARMLAND = "minecraft:farmland"
+local FERTILIZED = "farmingforblockheads:fertilized_farmland_healthy"
+
+local function isFarmland(id) return id == FARMLAND or id == FERTILIZED end
+
+-- a brace face for fluid placement / planting: any non-fluid block
+local function isSolid(b) return b ~= nil and b.id ~= "minecraft:water"
+  and b.id ~= "minecraft:lava" end
+
+-- The hoe tills dirt/grass/path into farmland; it is NOT consumed, only loses
+-- durability (TurtlePlaceCommand.java:223 -> vanilla HoeItem.useOn). The stack
+-- carries damage/maxDamage so getItemDetail(slot, true) exposes durability.
+local TILLABLE = { ["minecraft:dirt"] = true, ["minecraft:grass_block"] = true,
+  ["minecraft:dirt_path"] = true, ["minecraft:coarse_dirt"] = true,
+  ["minecraft:rooted_dirt"] = true }
+
+function Env:hoeItem(o)
+  o = o or {}
+  local env = self
+  return {
+    id = o.id or "minecraft:diamond_hoe", count = 1,
+    displayName = o.displayName or "Diamond Hoe",
+    damage = o.damage or 0, maxDamage = o.durability or 1561, -- diamond default
+    onUse = function(_, x, y, z, _dir, s)
+      local b = env.world[keyOf(x, y, z)]
+      if not (b and TILLABLE[b.id]) then return false, PLACE_FAIL end
+      if (s.damage or 0) >= s.maxDamage then return false, PLACE_FAIL end -- broken
+      env.world[keyOf(x, y, z)] = { id = FARMLAND, state = { moisture = 0 } }
+      s.damage = (s.damage or 0) + 1
+      return true, nil, 0 -- not consumed
+    end,
+  }
+end
+
+-- FfB red fertilizer: applies the HEALTHY trait to plain farmland once and
+-- shrinks 1 (FertilizerItem.java:114-132; RED = HEALTHY :28). Its only guard
+-- is player==null, which a fake player passes. The load-bearing negative for
+-- the builder's converge guards: it refuses an already-fertilized cell and
+-- consumes nothing (so a kill-redo never double-spends a fertilizer).
+function Env:fertilizerItem(o)
+  o = o or {}
+  local env = self
+  return {
+    id = o.id or "farmingforblockheads:fertilizer_rich", count = o.count or 1,
+    displayName = o.displayName or "Rich Fertilizer (Healthy)",
+    onUse = function(_, x, y, z, _dir, _s)
+      local b = env.world[keyOf(x, y, z)]
+      if not (b and b.id == FARMLAND) then return false, PLACE_FAIL end
+      env.world[keyOf(x, y, z)] = { id = FERTILIZED, state = { moisture = 0 } }
+      return true, nil, 1
+    end,
+  }
+end
+
+-- MA seed: a BlockItem; plants on a farmland top face -> crop age 0, shrinks 1
+-- (MysticalSeedsItem.java:17 ItemNameBlockItem; FertilizedFarmlandBlock
+-- canSustainPlant unconditional :38). The crop occupies the target air cell
+-- and needs farmland in the cell directly below it.
+function Env:seedItem(cropId, o)
+  o = o or {}
+  local env = self
+  return {
+    id = o.id or (cropId:gsub("_crop$", "_seeds")), count = o.count or 1,
+    displayName = o.displayName, cropId = cropId,
+    onUse = function(_, x, y, z, _dir, _s)
+      if env.world[keyOf(x, y, z)] then return false, PLACE_FAIL end -- not empty
+      local below = env.world[keyOf(x, y - 1, z)]
+      if not (below and isFarmland(below.id)) then return false, PLACE_FAIL end
+      env.world[keyOf(x, y, z)] = { id = cropId, state = { age = 0 } }
+      return true, nil, 1
+    end,
+  }
+end
+
+-- Water bucket: the explicit BucketItem branch (TurtlePlaceCommand.java:230-232)
+-- emits a source into the target air cell, which must have a solid brace face
+-- (Q1-water: canDeployOnBlock won't engage on pure air). The emptied bucket is
+-- written back to the slot (transformed in place, not consumed).
+function Env:waterBucketItem(o)
+  o = o or {}
+  local env = self
+  return {
+    id = o.id or "minecraft:water_bucket", count = 1,
+    displayName = o.displayName or "Water Bucket",
+    onUse = function(_, x, y, z, dir, s)
+      if env.world[keyOf(x, y, z)] then return false, PLACE_FAIL end -- not empty
+      -- The deploy braces against the block the bucket aims THROUGH, not any
+      -- neighbor: a placeDown is a Y-axis direction, so it can only brace
+      -- against the cell DIRECTLY BELOW the target (TurtlePlaceCommand gates
+      -- the horizontal "deploy on the block in front" path on a non-Y axis).
+      -- placeUp braces above; a horizontal place braces below (water needs a
+      -- floor either way). Modeling this faithfully is what forces the builder
+      -- to lay a sub-floor under each stacked-plot water cell (Q1-water).
+      local by = (dir == "up") and (y + 1) or (y - 1)
+      if not isSolid(env.world[keyOf(x, by, z)]) then return false, PLACE_FAIL end
+      env.world[keyOf(x, y, z)] = { id = "minecraft:water", state = { level = 0 } }
+      s.id = "minecraft:bucket"          -- emptied bucket written back
+      s.displayName = "Bucket"
+      return true, nil, 0
+    end,
+  }
+end
+
 -- Monitor mock, two flavors:
 --   { w=, h= }          fixed size, setTextScale is a no-op (legacy tests)
 --   { baseW=, baseH= }  scale-aware: size at textScale 1; like real CC,
@@ -1239,6 +1430,27 @@ local function buildTurtleApi(env, osT)
     -- "No items to place": TurtlePlaceCommand.java:52
     if not stack or stack.count < 1 then return false, "No items to place" end
     local x, y, z = targetCell(dir)
+    -- Use-on-block items (hoe/fertilizer/seed/water bucket) dispatch their own
+    -- useOn semantics (FARM-RESEARCH Q1; TurtlePlaceCommand.java:223,230-232):
+    -- they may target an OCCUPIED cell (till/fertilize transform in place) or
+    -- require specific bracing (seed needs farmland below; bucket a solid
+    -- brace), so they run BEFORE the "Cannot place block here" check. The item
+    -- fully owns its precondition, world mutation, and consumption, returning
+    -- ok, err, consumed (items to remove from the stack; 0 = not consumed,
+    -- e.g. the hoe loses durability only). On a precondition miss it returns
+    -- false + the stack is retained, mirroring the makeBlock contract.
+    if stack.onUse then
+      local ok, err, consumed = stack.onUse(env, x, y, z, dir, stack)
+      if not ok then return false, err end
+      consumed = consumed or 0
+      if consumed > 0 then
+        stack.count = stack.count - consumed
+        if stack.count <= 0 then t.inv[t.sel] = nil end
+      end
+      env.worldOps = (env.worldOps or 0) + 1
+      env:rescanSides(false)
+      return true
+    end
     -- "Cannot place block here": TurtlePlaceCommand.java:73
     if env.world[keyOf(x, y, z)] then return false, "Cannot place block here" end
     if stack.makeBlock then
@@ -1299,6 +1511,25 @@ local function buildTurtleApi(env, osT)
   function T.suckUp() return suck("up") end
   function T.suckDown() return suck("down") end
 
+  -- drop the selected slot's items onto the ground at the target cell (with no
+  -- adjacent inventory the real turtle drops into the world, TurtleDropCommand)
+  local function drop(dir, n)
+    takeTime()
+    local s = t.inv[t.sel]
+    if not s or s.count < 1 then return false, "No items to drop" end
+    local x, y, z = targetCell(dir)
+    local cnt = math.min(n or s.count, s.count)
+    dropAt(keyOf(x, y, z),
+      { id = s.id, count = cnt, components = s.components, onUse = s.onUse,
+        makeBlock = s.makeBlock, cropId = s.cropId, displayName = s.displayName })
+    s.count = s.count - cnt
+    if s.count <= 0 then t.inv[t.sel] = nil end
+    return true
+  end
+  function T.drop(n) return drop("front", n) end
+  function T.dropUp(n) return drop("up", n) end
+  function T.dropDown(n) return drop("down", n) end
+
   -- fuel = burnTime/20 (C4, FurnaceRefuelHandler.java:36-38); values below
   -- are the S3-verified pack numbers; override per-env via env.fuelValues
   local FUEL_VALUES = {
@@ -1344,10 +1575,24 @@ local function buildTurtleApi(env, osT)
     local s = t.inv[slot or t.sel]
     return s and s.count or 0
   end
-  function T.getItemDetail(slot)
+  -- getItemDetail(slot) -> { name, count }; getItemDetail(slot, true) adds the
+  -- detailed fields CC exposes, including tool durability (damage/maxDamage/
+  -- durability), the signal the farm builder uses to restock the hoe before it
+  -- breaks mid-plot.
+  function T.getItemDetail(slot, detailed)
     local s = t.inv[slot or t.sel]
     if not s then return nil end
-    return { name = s.id, count = s.count }
+    local d = { name = s.id, count = s.count }
+    if detailed then
+      d.displayName = s.displayName or s.id
+      d.tags = s.tags or {}
+      if s.maxDamage then
+        d.damage = s.damage or 0
+        d.maxDamage = s.maxDamage
+        d.durability = (s.maxDamage - (s.damage or 0)) / s.maxDamage
+      end
+    end
+    return d
   end
 
   return T

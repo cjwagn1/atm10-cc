@@ -3,10 +3,12 @@
 -- listed below. Bump `version` whenever programs change; in-game
 -- computers pick it up with a single `update`.
 return {
-  version = 29,
+  version = 30,
   files = {
     { path = "chemwall",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/chemwall.lua" },
+    { path = "farm",
+      url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/farm.lua" },
     { path = "sled",
       url = "https://raw.githubusercontent.com/cjwagn1/atm10-cc/main/programs/sled.lua" },
     { path = "sledctl",
@@ -41,5 +43,6 @@ return {
     sledctl = "sledctl",
     console = "console",
     chemwall = "chemwall",
+    farm = "farm",
   },
 }
