@@ -16,23 +16,34 @@ behavior relied on here is cited in the research; nothing was assumed.
 
 ## 1. What the operator does (the whole list — place-and-go)
 
-1. **Drop a turtle** (Advanced, with a **Geo Scanner** upgrade so it can find the
-   plot; no other tool needed) somewhere near your existing sulfur plot.
-2. **Slap an ME Bridge** next to it (or on its wired network), connected to the
-   AE network that reaches the mining dim.
+1. **Drop a turtle** (Advanced). A **Geo Scanner** upgrade lets it find the plot
+   from anywhere nearby; without one, set it **on top of the farm** and it
+   searches on foot (Task #18). No other tool needed.
+2. **Put a chest next to the turtle** (directly above or below it) and **slap an
+   ME Bridge** touching that chest (any side), on the AE network that reaches the
+   mining dim. The turtle figures out the handoff itself (Task #17).
 3. **Run the installer** and `farm`. On first run it auto-discovers everything,
    tells you what it found, and starts building. It may ask the copy count.
 
 That's it — no coordinates, no config file, no in-game Lua. On first run the
 turtle:
-- **finds the plot itself** by scanning (`peripheral.find` a Geo Scanner → scan a
-  radius → keep the plot-signature blocks → bounding box),
-- **works out its own world heading with no GPS** (steps one block, watches the
-  scanned plot's offset shift),
-- **discovers the ME Bridge** (`peripheral.find`),
+- **finds the plot itself** — with a Geo Scanner by scanning (`peripheral.find` a
+  `geo_scanner` → scan a radius → keep the plot-signature blocks → bounding box);
+  with no scanner by flying a bounded spiral and inspecting down,
+- **works out its own heading with no GPS** (scanner path: steps one block,
+  watches the scanned plot's offset shift; on-foot path: works in its own local
+  frame so no calibration is needed),
+- **discovers the ME Bridge** (`peripheral.find` `me_bridge`) and **calibrates
+  the supply handoff** — it probes which export side feeds the chest and which
+  way to suck, so the bridge can sit on any side of the chest,
 - **writes its own `farm.conf`** in a turtle-relative frame (the drop point is
   the origin), so reboots resume,
 - **scans your plot and stacks the copies above it.**
+
+> **Note on the Geo Scanner type.** AP registers it as `geo_scanner` (underscore)
+> — `peripheral.find("geoScanner")` silently misses an equipped upgrade. The
+> turtle now tries `geo_scanner`, then `geoScanner`, then any peripheral exposing
+> `scan()`, so an equipped scanner is never reported missing again.
 
 Your AE network just needs the materials in stock or craftable: dirt, a diamond
 hoe, `farmingforblockheads:red_fertilizer`, `mysticalagriculture:sulfur_seeds`,
@@ -133,6 +144,17 @@ constant). The hoe is restocked before it breaks mid-plot (durability read from
 staging cell (`recoverDrop`) so a kill between export and suck re-collects rather
 than re-pulls.
 
+**Handoff calibration (Task #17).** A real `exportItem(filter, side)` pushes into
+the inventory on *that* side of the bridge; the turtle then sucks from the cell
+next to itself. So the operator's layout (turtle on a chest, bridge beside the
+chest) means the bridge must export *sideways*, not up. The wizard discovers this
+at setup: for each export side × {`suckDown`,`suckUp`} it pushes one dirt probe
+and checks whether it round-trips into a turtle slot, recording the first pair
+that works into `base.export_side`/`base.suck`. Vertical sucks only, so the
+discovered direction stays correct when restock re-parks (it is heading-
+independent). If probing can't collect, it falls back to the classic
+chest-directly-below handoff and the self-test still gates the real build.
+
 ### 3.5 Self-test gate — abort loudly, build nothing
 Once per `build` (journaled `selftest=done`, skipped on resume so reboots do not
 waste materials): prove the cross-dim AE pull, a craft request, and the
@@ -152,14 +174,16 @@ progress; token-gated `update`/`version?` on the shared `basectl` channel so
 The harness (`harness/cc_env.lua`) was extended with turtle item-use semantics
 (hoe/fertilizer/seed/water bucket, all source-verified return values + tool
 durability) and the ME-Bridge crafting surface (`getItem`/`getItems`/
-`isCraftable`/`craftItem` async/`exportItem`). `tests/run_farm_tests.lua` is
-**34/34 green** headless, covering: primitive fidelity + negative preconditions;
-capture round-trip + idempotency; single-plot and 2-plot builds; idempotent
-converge; AE supply with on-demand crafting; the self-test gate (pass → builds,
-fail → builds nothing); kill-resume across a 5-point kill sweep (no double-
-fertilize/plant, write-ahead pos invariant), stranded-export recovery (no double-
-pull), a 2-plot mid-ascent kill; and telemetry + basectl. The 97 telemetry and
-60 sled regression tests stay green.
+`isCraftable`/`craftItem` async/`exportItem` side-aware). `tests/run_farm_tests
+.lua` is **39/39 green** headless, covering: primitive fidelity + negative
+preconditions; **Geo Scanner detection under the real `geo_scanner` type + a
+`scan()`-method fallback**; auto-find (scanner and **on-foot spiral**) + **supply
+handoff calibration**; capture round-trip + idempotency; single-plot and 2-plot
+builds; idempotent converge; AE supply with on-demand crafting; the self-test
+gate (pass → builds, fail → builds nothing); kill-resume across a 5-point kill
+sweep (no double-fertilize/plant, write-ahead pos invariant), stranded-export
+recovery (no double-pull), a 2-plot mid-ascent kill; and telemetry + basectl.
+The 97 telemetry and 60 sled regression tests stay green.
 
 ```
 toolchain/lua-5.2.4/src/lua tests/run_farm_tests.lua    # 34
@@ -204,8 +228,16 @@ reach. The self-test catches all of them at startup before any real plot.
   directional marker at the build base; on boot, re-anchor pose + heading from a
   physical fingerprint before trusting the journal). Until then, **eyeball the
   first stack after any hard kill.**
-- **Auto-size detection** — v1 takes the footprint from `farm.conf` (`origin` +
-  `size`); a future pass can probe the extent so the scan settles the size.
+- **On-foot search reach (no Geo Scanner).** The scanner-less search only sees
+  the block directly below it, so the plot must be one block under the drop
+  altitude (set the turtle *on top of* the farm) and within the spiral radius. A
+  Geo Scanner removes both constraints — find it from any nearby position, at any
+  altitude. Equipping one is the robust path; the on-foot search is the
+  zero-upgrade floor.
+- **Supply handoff** is now auto-calibrated, but the chest must be **directly
+  above or below** the turtle (the bridge can touch it on any side). A chest only
+  reachable by a horizontal suck is not probed (vertical sucks stay correct
+  across re-parks without tracking a park heading); place the chest above/below.
 - **Mid-cell restock travel** is lazy (a park round trip when a slot runs dry);
   a per-plot batch pre-load would cut trips on tall stacks.
 - **Emptied water buckets** are dropped (a cheap consumable) after each source
