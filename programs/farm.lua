@@ -1519,6 +1519,71 @@ end
 
 -- `farm find`: a no-config dry run of the autonomous plot-find, so the operator
 -- can confirm the turtle sees their plot before committing to a build.
+-- `farm ae`: prove the AE link. Reports the bridge connection/energy, how many
+-- item types its grid exposes (0 = the bridge is NOT joined to your network),
+-- whether dirt is there, and whether a real export actually reaches the turtle.
+if cmd == "ae" then
+  local b, bname = findBridge()
+  if not b then
+    print("farm: no ME Bridge found - mount one ON me (or wire it), reboot.")
+    return
+  end
+  print("farm: bridge = " .. tostring(bname))
+  local function try(m, ...)
+    if type(b[m]) ~= "function" then return "(no " .. m .. ")" end
+    local ok, r = pcall(b[m], ...)
+    return ok and r or ("ERR:" .. tostring(r))
+  end
+  print("  connected=" .. tostring(try("isConnected"))
+    .. " online=" .. tostring(try("isOnline")))
+  print("  energy=" .. tostring(try("getStoredEnergy"))
+    .. "/" .. tostring(try("getEnergyCapacity")))
+  local items = try("getItems")
+  if type(items) == "table" then
+    print("  grid item types: " .. #items)
+    for i = 1, math.min(6, #items) do
+      print(("    %s x%s"):format(tostring(items[i] and items[i].name),
+        tostring(items[i] and items[i].count)))
+    end
+  else
+    print("  getItems -> " .. tostring(items))
+  end
+  local d = try("getItem", { name = "minecraft:dirt" })
+  if type(d) == "table" then
+    print(("  dirt: count=%s craftable=%s")
+      :format(tostring(d.count), tostring(d.isCraftable)))
+  else
+    print("  dirt: " .. tostring(d) .. " (NOT in the grid)")
+  end
+  -- proof-of-pull: export 1 dirt to each side; did it actually reach me?
+  local function invCount()
+    local n = 0
+    for s = 1, 16 do n = n + turtle.getItemCount(s) end
+    return n
+  end
+  local before, pulled = invCount(), false
+  for _, side in ipairs(CAL_EXPORT_SIDES) do
+    local n = try("exportItem", { name = "minecraft:dirt", count = 1 }, side)
+    if type(n) == "number" and n > 0 then
+      if invCount() > before then
+        print("  PULL OK: export '" .. side .. "' landed dirt in me.")
+        pulled = true; break
+      end
+      turtle.select(15)
+      if turtle.suckDown() or turtle.suckUp() then
+        print("  PULL OK: export '" .. side .. "' -> chest, sucked it.")
+        pulled = true; break
+      end
+    end
+  end
+  if not pulled then
+    print("  PULL FAILED: couldn't get dirt out of the bridge.")
+    print("  grid item types 0 => the bridge isn't on your AE network")
+    print("  (needs power + a channel + the cross-dim link). Fix that first.")
+  end
+  return
+end
+
 if cmd == "find" then
   local radius = tonumber(args[2]) or SCAN_RADIUS
   local p, why = findPlot(radius)

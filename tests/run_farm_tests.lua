@@ -873,6 +873,34 @@ T("reset: wipes config, blueprint, and journal back to first-run state", functio
   eq(env:file("farm.journal.bak"), nil, "journal backup deleted")
 end)
 
+-- `farm ae` is a diagnostic: it reports what the bridge's AE grid actually
+-- exposes and PROVES a real pull (or shows the grid is empty = the bridge isn't
+-- joined to the network). The operator needs to SEE the AE works.
+T("ae: diagnostic reports the grid and proves a real pull", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100 } }
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 5, items = { dirt } })
+  current = env
+  env:run(FARM, { "ae" }, { maxTime = 30 })
+  local t = env:termText()
+  expectContains(t, "grid item types: 1", "reported the grid contents")
+  expectContains(t, "dirt: count=256", "found dirt in the grid")
+  expectContains(t, "PULL OK", "proved a real pull from AE")
+end)
+
+T("ae: an empty/disconnected bridge shows 0 item types and PULL FAILED", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100 } }
+  env:addMeBridge("me", { stored = 0, max = 2e6, usage = 0, items = {} })
+  current = env
+  env:run(FARM, { "ae" }, { maxTime = 30 })
+  local t = env:termText()
+  expectContains(t, "grid item types: 0", "empty grid reported")
+  expectContains(t, "PULL FAILED", "couldn't pull from an empty grid")
+end)
+
 -- ------------------------------------------- 3. farm.lua: capture (Q3)
 -- Inspect-traversal of a reference plot -> normalized blueprint. Fertilized
 -- farmland becomes a soil recipe (build = dirt + till + fertilize), never a
