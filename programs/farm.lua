@@ -757,11 +757,21 @@ end
 -- export a batch to the staging cell, suck it, return to the build cell. All AE
 -- actions are machine-sourced - no fake-player path (Q2).
 local function restock(slot, spec, minCount, batch)
-  if not bridge or not cfg.base.park then return false end
+  if not cfg.base.park then return false end
   batch = batch or 64
   local saved, savedHeading = copyPos(S.pos), S.heading
   intent("restock " .. spec.name)
   if not navSafe(cfg.base.park.x, cfg.base.park.y, cfg.base.park.z) then
+    return false
+  end
+  -- Re-acquire the bridge AFTER parking. A turtle reaches an adjacent peripheral
+  -- by its SIDE name, which rotates with the turtle - a handle wrapped before I
+  -- moved/turned points at the wrong side and silently reads an empty grid (the
+  -- "AE has nothing" bug). findBridge re-scans every side, so this is correct
+  -- regardless of which way I ended up facing.
+  bridge = findBridge() or bridge
+  if not bridge then
+    navSafe(saved.x, saved.y, saved.z); faceTo(savedHeading); clearIntent()
     return false
   end
   turtle.select(slot)
@@ -1342,6 +1352,12 @@ local CAL_SUCK_DIRS = { "down", "up" }
 local CAL_SLOT = 15  -- the scratch slot (conf.slots.scratch default)
 
 local function calibrateSupply(bridge0)
+  -- Re-acquire the bridge: calibrating my heading turned/moved me, so the
+  -- bridge's peripheral side (and any handle wrapped before) changed. Without
+  -- this, getItem reads the wrong side and reports an empty grid even though the
+  -- AE is full (the "farm ae works but farm doesn't" bug).
+  bridge0 = findBridge() or bridge0
+  if not bridge0 then return nil, "lost the ME Bridge after calibrating heading" end
   -- A probe to push through the handoff so we can see which side feeds the
   -- turtle. Prefer something already in stock (dirt, else anything); if the AE
   -- keeps NO raw stock (everything autocrafted on demand), craft one dirt - the
