@@ -602,7 +602,44 @@ T("find: reports nothing-found with no Geo Scanner and no plot", function()
     facing = "north", fuel = 100 } }
   current = env
   env:run(FARM, { "find" }, { maxTime = 10 })
-  expectContains(env:termText(), "no sulfur plot", "clear not-found message")
+  expectContains(env:termText(), "no plot found", "clear not-found message")
+end)
+
+-- The plot signature must be mod-agnostic: the operator's farm uses whatever
+-- farmland/crop/accelerator blocks their pack provides, not the exact ids in the
+-- canonical study. Match by substring so a different soil tier or crop mod still
+-- registers (the old exact-id match silently saw "no plot").
+T("find: matches a plot by generic farmland/crop signature (any mod)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 70, z = 0 },
+    facing = "north", fuel = 5000 } }
+  env:addGeoScanner("scanner")
+  for dx = 0, 2 do
+    for dz = 0, 2 do
+      env:setBlock(3 + dx, 64, dz, { id = "farmersdelight:rich_farmland" })
+      env:setBlock(3 + dx, 65, dz, { id = "croptopia:tomato_crop" })
+    end
+  end
+  current = env
+  env:run(FARM, { "find" }, { maxTime = 30 })
+  expectContains(env:termText(), "found a 3x3 plot",
+    "matched by generic farmland/crop signature, not hardcoded ids")
+end)
+
+-- When nothing matches, the turtle must report WHAT it saw + the scanner's reach,
+-- so the operator can see whether the farm is out of range or uses other blocks
+-- (instead of a dead-end "no plot"). Answers "what is it even looking for?".
+T("find: no match -> reports the blocks it saw and the 16-block reach", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 70, z = 0 },
+    facing = "north", fuel = 5000 } }
+  env:addGeoScanner("scanner")
+  for dx = -2, 2 do
+    for dz = -2, 2 do env:setBlock(dx, 69, dz, { id = "minecraft:grass_block" }) end
+  end
+  current = env
+  env:run(FARM, { "find" }, { maxTime = 30 })
+  local t = env:termText()
+  expectContains(t, "minecraft:grass_block", "reported what it actually saw")
+  expectContains(t, "16 blocks", "explained the scanner's 16-block reach")
 end)
 
 -- Task #18: NO Geo Scanner at all. Set the turtle on top of the farm (one block

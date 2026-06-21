@@ -275,15 +275,17 @@ end
 -- needed. (A search-by-flying fallback for a turtle with no scanner is a v1
 -- TODO; with a scanner the find is one call.)
 
+-- Mod-agnostic plot signature: a sulfur (or any MA) plot is farmland + crops,
+-- usually ringed by growth accelerators. Match by SUBSTRING, not exact ids, so a
+-- different soil tier, crop mod, or accelerator still registers - the operator's
+-- pack chooses the blocks, not us. (The build's classify() still keys on the
+-- exact captured ids; this is only the find heuristic.)
 local function isPlotBlock(name)
-  if name == "farmingforblockheads:fertilized_farmland_healthy" then return true end
-  if name == "minecraft:farmland" then return true end
-  if name == "ae2:growth_accelerator" then return true end
-  if name:find("crop", 1, true)
-    and (name:find("agriculture", 1, true) or name:find("mystical", 1, true)) then
-    return true
-  end
-  return false
+  if type(name) ~= "string" then return false end
+  return name:find("farmland", 1, true) ~= nil
+    or name:find("_crop", 1, true) ~= nil
+    or name:find("accelerat", 1, true) ~= nil
+    or name:find("fertiliz", 1, true) ~= nil
 end
 
 -- AP's Geo Scanner peripheral type is "geo_scanner" (GeoScannerPeripheral
@@ -303,18 +305,27 @@ local function findScanner()
   return nil
 end
 
--- Returns { rx, ry, rz (relative min corner), w, h, d, blocks } or nil + reason.
-local function findPlot(radius)
+-- The AP Geo Scanner reaches at most 16 blocks (SphereOperation max-cost radius;
+-- 8 free). Raw scan with a brief cooldown/charge retry; returns the block list
+-- or nil + reason.
+local SCAN_RADIUS = 16
+
+local function scanBlocks(radius)
   local scanner = findScanner()
   if not scanner then return nil, "no Geo Scanner equipped" end
-  radius = radius or 16
-  local blocks
+  radius = radius or SCAN_RADIUS
   for _ = 1, 30 do -- the scanner may be charging / on cooldown: retry briefly
     local b = scanner.scan(radius)
-    if type(b) == "table" then blocks = b; break end
+    if type(b) == "table" then return b end
     sleep(1)
   end
-  if not blocks then return nil, "scan failed" end
+  return nil, "scan failed (scanner out of fuel / on cooldown?)"
+end
+
+-- Returns { rx, ry, rz (relative min corner), w, h, d, blocks } or nil + reason.
+local function findPlot(radius)
+  local blocks, err = scanBlocks(radius)
+  if not blocks then return nil, err end
   local minx, miny, minz, maxx, maxy, maxz, n
   n = 0
   for _, b in ipairs(blocks) do
@@ -328,6 +339,53 @@ local function findPlot(radius)
   if n == 0 then return nil, "no plot in range" end
   return { rx = minx, ry = miny, rz = minz,
     w = maxx - minx + 1, h = maxy - miny + 1, d = maxz - minz + 1, blocks = n }
+end
+
+-- Diagnostic: what does the scanner actually see? A name->count histogram plus
+-- how many matched the plot signature, so a failed find can say whether the farm
+-- is out of range or simply built from blocks we don't yet match.
+local function scanReport(radius)
+  local blocks, err = scanBlocks(radius)
+  if not blocks then return nil, err end
+  local hist, matched = {}, 0
+  for _, b in ipairs(blocks) do
+    hist[b.name] = (hist[b.name] or 0) + 1
+    if isPlotBlock(b.name) then matched = matched + 1 end
+  end
+  -- sort distinct names by count desc, plot-matches first so the farm blocks
+  -- surface even when terrain dominates the count
+  local names = {}
+  for nm in pairs(hist) do names[#names + 1] = nm end
+  table.sort(names, function(a, b)
+    local pa, pb = isPlotBlock(a), isPlotBlock(b)
+    if pa ~= pb then return pa end
+    if hist[a] ~= hist[b] then return hist[a] > hist[b] end
+    return a < b
+  end)
+  return { count = #blocks, matched = matched, hist = hist, names = names }
+end
+
+-- Print the "why didn't you find my plot" diagnostic: what the scanner saw and
+-- the 16-block reach, so the operator can tell range vs. block-id mismatch.
+-- Used by `farm find` and by the wizard when its own scan comes up empty.
+local function printPlotDiagnostic(radius)
+  radius = radius or SCAN_RADIUS
+  local rep, err = scanReport(radius)
+  if not rep then
+    print("farm: couldn't scan (" .. tostring(err) .. ").")
+    print("  Equip a Geo Scanner, or set me ON TOP of the farm to search on foot.")
+    return
+  end
+  print(("farm: scanned radius %d - saw %d blocks, %d look like a plot.")
+    :format(radius, rep.count, rep.matched))
+  print("farm: the most notable blocks in range:")
+  for i = 1, math.min(12, #rep.names) do
+    local nm = rep.names[i]
+    print(("  %s x%d%s"):format(nm, rep.hist[nm],
+      isPlotBlock(nm) and "  <- plot-like" or ""))
+  end
+  print("farm: I match any *farmland* / *_crop* / *accelerat* / *fertiliz* block.")
+  print("  My scanner only reaches 16 blocks - set me ON or right beside the farm.")
 end
 
 -- Deduce the turtle's real WORLD facing with no GPS/compass: the Geo Scanner
@@ -1160,7 +1218,8 @@ local function runWizard(plotCount)
     p, why = findPlot()
     if not p then
       print("farm: couldn't find a plot (" .. tostring(why) .. ").")
-      print("  Set me down near the farm, then reboot.")
+      printPlotDiagnostic()
+      print("  Fix that, then reboot. ('farm find' re-runs just this check.)")
       return false
     end
     heading, why = calibrateHeading()
@@ -1240,16 +1299,17 @@ local cmd = args[1]
 -- `farm find`: a no-config dry run of the autonomous plot-find, so the operator
 -- can confirm the turtle sees their plot before committing to a build.
 if cmd == "find" then
-  local p, why = findPlot()
+  local radius = tonumber(args[2]) or SCAN_RADIUS
+  local p, why = findPlot(radius)
   if p then
     print(("farm: found a %dx%d plot (h=%d) from %d signature blocks.")
       :format(p.w, p.d, p.h, p.blocks))
     print(("  min corner is x%+d y%+d z%+d relative to me.")
       :format(p.rx, p.ry, p.rz))
-  else
-    print("farm: no sulfur plot found nearby (" .. tostring(why) .. ").")
-    print("  Equip a Geo Scanner and/or set me down closer to the farm.")
+    return
   end
+  print("farm: no plot found (" .. tostring(why) .. ").")
+  printPlotDiagnostic(radius)
   return
 end
 
