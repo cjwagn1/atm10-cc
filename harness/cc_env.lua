@@ -1272,6 +1272,17 @@ function Env:hoeItem(o)
       local b = env.world[keyOf(x, y, z)]
       if not (b and TILLABLE[b.id]) then return false, PLACE_FAIL end
       if (s.damage or 0) >= s.maxDamage then return false, PLACE_FAIL end -- broken
+      -- Vanilla HoeItem.onlyIfAirAbove: dirt only converts when the block
+      -- DIRECTLY ABOVE the target is air (HoeItem.java; clickedFace != DOWN &&
+      -- level.getBlockState(clickedPos.above()).isAir()). A CC place() does NOT
+      -- remove the turtle's own block during the use (TurtlePlaceCommand only
+      -- repositions a fake player), so a placeDown-from-above till sees the
+      -- TURTLE'S cell above the dirt and silently no-ops. Model both occupants:
+      -- a real world block above, OR the turtle itself standing at (x, y+1, z).
+      local above = env.world[keyOf(x, y + 1, z)]
+      local t = env.turtle
+      local turtleAbove = t and t.pos.x == x and t.pos.y == y + 1 and t.pos.z == z
+      if above ~= nil or turtleAbove then return false, PLACE_FAIL end -- no till, no spend
       env.world[keyOf(x, y, z)] = { id = FARMLAND, state = { moisture = 0 } }
       s.damage = (s.damage or 0) + 1
       return true, nil, 0 -- not consumed

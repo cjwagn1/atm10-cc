@@ -76,6 +76,7 @@ local DIRV = {
 }
 local LEFTD = { north = "west", west = "south", south = "east", east = "north" }
 local RIGHTD = { north = "east", east = "south", south = "west", west = "north" }
+local OPPD = { north = "south", south = "north", east = "west", west = "east" }
 
 local function key(x, y, z) return x .. "," .. y .. "," .. z end
 
@@ -1121,6 +1122,45 @@ end
 
 local FERTILIZED_SOIL = "farmingforblockheads:fertilized_farmland_healthy"
 
+-- Till the dirt directly BELOW the current stance (cx, Y0+1, cz) by tilling it
+-- from the SIDE. Vanilla HoeItem only converts dirt->farmland when the block
+-- directly above the dirt is air (HoeItem.onlyIfAirAbove), and a CC turtle's own
+-- block is never removed during place() (TurtlePlaceCommand only repositions a
+-- fake player) - so a placeDown from the stance ABOVE the dirt sees the turtle's
+-- own cell and silently no-ops (the in-game "plot N: till" halt). Instead, step
+-- into a clear horizontal neighbour, drop to the soil layer, face back toward the
+-- dirt, and till it as the block IN FRONT (its block above is now air). Returns
+-- to the stance and restores the heading on success. Kill-safe: every move
+-- journals S.pos, and a resume re-runs doSoil (tilling existing farmland is a
+-- no-op), so a kill mid-side-till converges.
+local function tillBelowFromSide()
+  local saved = S.heading
+  for _, dir in ipairs({ "north", "south", "east", "west" }) do
+    faceTo(dir)
+    -- the stance-level neighbour and the soil-level neighbour must both be clear
+    if not turtle.detect() and goFwd() then
+      if not turtle.detectDown() and goDown() then
+        faceTo(OPPD[dir]) -- face back toward the dirt cell (now in front)
+        turtle.select(cfg.slots.hoe)
+        intent("till"); turtle.place(); clearIntent()
+        local has, info = turtle.inspect()
+        local tilled = has and (info.name == "minecraft:farmland"
+          or info.name == FERTILIZED_SOIL)
+        -- return to the stance: rise back to the stance layer, then step back
+        -- into the stance column (we already face OPPD[dir], i.e. toward it)
+        goUp(); goFwd()
+        faceTo(saved)
+        if tilled then return true end
+      else
+        -- could not drop beside the dirt: back out of the neighbour and try next
+        faceTo(OPPD[dir]); goFwd(); faceTo(saved)
+      end
+    end
+  end
+  faceTo(saved)
+  return false
+end
+
 local function doSoil(tier)
   local cur = nameBelow()
   if cur == nil then
@@ -1133,11 +1173,14 @@ local function doSoil(tier)
   end
   if cur == "minecraft:dirt" or cur == "minecraft:grass_block" then
     if not ensureHoe() then return false, "no-hoe" end
-    turtle.select(cfg.slots.hoe)
-    intent("till"); turtle.placeDown(); clearIntent()
+    -- Till from the SIDE: a placeDown from this stance (one block ABOVE the dirt)
+    -- can never till because the turtle's own block is the non-air block above
+    -- the dirt (HoeItem.onlyIfAirAbove). tillBelowFromSide steps into a clear
+    -- neighbour, drops beside the dirt, and tills it as the block in front.
+    tillBelowFromSide()
     cur = nameBelow()
-    -- a broken/vetoed hoe leaves the cell un-tilled: halt loudly rather than
-    -- silently reporting an un-tilled cell as done (P0-2 read-back)
+    -- a broken/vetoed hoe or no clear side leaves the cell un-tilled: halt
+    -- loudly rather than silently reporting an un-tilled cell as done (P0-2)
     if cur ~= "minecraft:farmland" and cur ~= FERTILIZED_SOIL then
       return false, "till"
     end
@@ -1386,7 +1429,9 @@ local function selfTest()
     end
     if cur == "minecraft:dirt" then
       if not ensureHoe() then return selfTestFail("no hoe available") end
-      turtle.select(cfg.slots.hoe); turtle.placeDown(); cur = belowName()
+      -- till from the side: a placeDown from above never tills (the turtle's own
+      -- block is the non-air block above the dirt; HoeItem.onlyIfAirAbove)
+      tillBelowFromSide(); cur = belowName()
       if cur ~= "minecraft:farmland" then return selfTestFail("till (hoe)") end
     end
     if cur == "minecraft:farmland" then

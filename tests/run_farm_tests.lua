@@ -263,15 +263,54 @@ end)
 -- useOn; the hoe tills dirt->farmland WITHOUT being consumed (durability only),
 -- TurtlePlaceCommand.java:223 + vanilla HoeItem.useOn.
 
-T("hoe: placeDown tills dirt to farmland, not consumed, durability drops", function()
+-- Vanilla HoeItem.onlyIfAirAbove: dirt only tills when the block DIRECTLY ABOVE
+-- the target is air. A CC place() never removes the turtle's own block during
+-- the use (TurtlePlaceCommand repositions a fake player; the turtle block stays
+-- in the world), so a placeDown-from-ABOVE till sees the turtle's own cell over
+-- the dirt and silently NO-OPS - the in-game "plot 0: till" halt. A horizontal
+-- SIDE till (turtle beside the dirt, air above the dirt) DOES convert.
+T("hoe: placeDown from ABOVE does NOT till (turtle's own block blocks air-above)", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
-    facing = "east", fuel = 100,
-    inv = { [1] = nil } } }
+    facing = "east", fuel = 100, inv = { [1] = nil } } }
   env.turtle.inv[1] = env:hoeItem{ durability = 100 }
   env:setBlock(0, 63, 0, { id = "minecraft:dirt" })   -- cell below the turtle
   env.files["prog.lua"] = [[
     local out = fs.open("out", "w")
-    out.writeLine(tostring(turtle.placeDown()))         -- till dirt below
+    out.writeLine(tostring(turtle.placeDown()))         -- till dirt below -> no-op
+    local d = turtle.getItemDetail(1, true)
+    out.writeLine("dmg=" .. tostring(d and d.damage))
+    out.close()
+  ]]
+  current = env
+  local res = env:run("prog.lua", {}, { maxTime = 30, fromVirtualFs = true })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(env:block(0, 63, 0).id, "minecraft:dirt", "dirt stays dirt - turtle blocks air-above")
+  eq(env:file("out"), "false\ndmg=0\n", "till fails, no durability spent")
+end)
+
+T("hoe: a non-air world block above the dirt also blocks the till", function()
+  local env = CC.new{ turtle = { pos = { x = 5, y = 64, z = 0 },
+    facing = "east", fuel = 100, inv = { [1] = nil } } }
+  env.turtle.inv[1] = env:hoeItem{ durability = 100 }
+  -- turtle is far away; the dirt has a STONE block directly above it
+  env:setBlock(0, 63, 0, { id = "minecraft:dirt" })
+  env:setBlock(0, 64, 0, { id = "minecraft:stone" })
+  local hoe = env.turtle.inv[1]
+  local ok = hoe.onUse(env, 0, 63, 0, "down", hoe)
+  eq(ok, false, "till refused - non-air block above the dirt")
+  eq(env:block(0, 63, 0).id, "minecraft:dirt", "dirt unchanged")
+  eq(hoe.damage, 0, "no durability spent")
+end)
+
+T("hoe: SIDE till (turtle beside, air above the dirt) converts to farmland", function()
+  -- turtle at (1,63,0) facing west, dirt at (0,63,0) - same Y, air above dirt
+  local env = CC.new{ turtle = { pos = { x = 1, y = 63, z = 0 },
+    facing = "west", fuel = 100, inv = { [1] = nil } } }
+  env.turtle.inv[1] = env:hoeItem{ durability = 100 }
+  env:setBlock(0, 63, 0, { id = "minecraft:dirt" })   -- cell IN FRONT of turtle
+  env.files["prog.lua"] = [[
+    local out = fs.open("out", "w")
+    out.writeLine(tostring(turtle.place()))             -- till dirt in front
     local d = turtle.getItemDetail(1, true)
     out.writeLine((d and d.name or "nil") .. " x" .. tostring(d and d.count))
     out.writeLine("dmg=" .. tostring(d and d.damage))
@@ -280,7 +319,7 @@ T("hoe: placeDown tills dirt to farmland, not consumed, durability drops", funct
   current = env
   local res = env:run("prog.lua", {}, { maxTime = 30, fromVirtualFs = true })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
-  eq(env:block(0, 63, 0).id, "minecraft:farmland", "dirt tilled to farmland")
+  eq(env:block(0, 63, 0).id, "minecraft:farmland", "dirt tilled to farmland from the side")
   eq(env:file("out"),
     "true\nminecraft:diamond_hoe x1\ndmg=1\n", "hoe survives, durability used")
 end)
@@ -2054,11 +2093,15 @@ T("orchestration: a token-gated basectl 'update' is acked", function()
   local env = buildRig{ blueprint = BP_3x3_NOWATER }
   env:addModem("left")
   env.files["update.lua"] = "print('updated')" -- stand-in for the real updater
-  env:rednetAt(70, 9, { token = "flux", cmd = "update" }, "basectl")
-  env:rednetAt(72, 9, { token = "wrong", cmd = "update" }, "basectl") -- ignored
-  env:terminateAt(120)
+  -- the ctl ack only happens in serveIdle (post-build), so the messages must
+  -- land AFTER the build completes; the side-till build is ~90 sim-sec long, so
+  -- deliver at 100/102 (the build phase consumes-and-drops rednet, it does not
+  -- buffer for serveIdle) and terminate the idle loop after.
+  env:rednetAt(100, 9, { token = "flux", cmd = "update" }, "basectl")
+  env:rednetAt(102, 9, { token = "wrong", cmd = "update" }, "basectl") -- ignored
+  env:terminateAt(200)
   current = env
-  env:run(FARM, { "build" }, { maxTime = 200 })
+  env:run(FARM, { "build" }, { maxTime = 400 })
   local acks = 0
   for _, m in ipairs(env.rednetSent) do
     if m.protocol == "basectl" and type(m.message) == "table" and m.message.ack then
