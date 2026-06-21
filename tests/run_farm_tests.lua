@@ -455,6 +455,35 @@ T("me bridge: exportItem two-returns (0, ERR) for an item not in stock", functio
   eq(env:file("out"), "0 ITEM_NOT_FOUND\n", "two-return error convention")
 end)
 
+-- A real ME Bridge exports to the inventory on the GIVEN side of the bridge;
+-- a side with no inventory delivers nothing. o.deliver = { side, cell } models
+-- a chest on exactly one side (e.g. the operator's "bridge next to a chest").
+-- This is what supply calibration discovers (Task #17).
+T("me bridge: exportItem honors the side - only the chest side delivers", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100 } }
+  local dirt = { id = "minecraft:dirt", count = 64 }
+  env:addMeBridge("me", { stored = 1, max = 2, usage = 0, items = { dirt },
+    deliver = { side = "north", cell = { x = 0, y = 65, z = 0 } } }) -- chest ABOVE
+  env.files["prog.lua"] = [[
+    local b = peripheral.wrap("me")
+    local out = fs.open("out", "w")
+    -- a side with no inventory: nothing delivered (real AP returns 0 + error)
+    local n0, e0 = b.exportItem({ name = "minecraft:dirt", count = 4 }, "up")
+    out.writeLine(tostring(n0) .. " " .. tostring(e0))
+    -- the chest side delivers; the turtle sucks UP to collect it
+    local n1 = b.exportItem({ name = "minecraft:dirt", count = 4 }, "north")
+    out.writeLine(tostring(n1) .. " sucked=" .. tostring(turtle.suckUp()))
+    out.writeLine("have=" .. tostring(turtle.getItemCount(1)))
+    out.close()
+  ]]
+  current = env
+  local res = env:run("prog.lua", {}, { maxTime = 10, fromVirtualFs = true })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(env:file("out"),
+    "0 INVENTORY_NOT_FOUND\n4 sucked=true\nhave=4\n", "side-gated delivery")
+end)
+
 -- ------------------------------------ 2b. farm.lua: autonomous plot-find
 -- The operator never tells the turtle where the plot is: with a Geo Scanner it
 -- scans a radius, filters the plot signature, and reports the bounding box.
@@ -534,6 +563,38 @@ T("setup wizard: no config at all -> finds, calibrates, scans, builds a copy", f
   eq(env:block(4, 76, 1) and env:block(4, 76, 1).id, "minecraft:water",
     "copy center water")
   eq(env:file("farm.conf") ~= nil, true, "wrote its own config for reboots")
+end)
+
+-- Task #17: the operator places the ME Bridge next to a chest and the turtle on
+-- the chest - the bridge must export SIDEWAYS into the chest, not "up". The old
+-- wizard hardcoded export_side="up"/suck="down", which silently delivers nothing
+-- for that layout. The wizard now PROBES (export side x suck dir) and records the
+-- pair that actually round-trips an item. Here the working handoff is a chest
+-- ABOVE the turtle fed from the bridge's "south" side: NEITHER default axis is
+-- right, so only probing both finds it.
+T("setup wizard: auto-calibrates the bridge handoff (export side + suck dir)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "east", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 3, 74, 0, 3, 3)
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  local water = env:waterBucketItem(); water.count = 16
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    deliver = { side = "south", cell = { x = 0, y = 81, z = 0 } }, -- chest ABOVE park
+    items = { dirt, hoe, fert, seed, water, coal } })
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  local conf = loadTable(env:file("farm.conf"), "farm.conf")
+  eq(conf.base.export_side, "south", "discovered the working export side")
+  eq(conf.base.suck, "up", "discovered the working suck dir")
+  -- and the build actually completes pulling through the calibrated handoff
+  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 3, 0), 8, "copy built via the calibrated supply path")
 end)
 
 T("find: reports nothing-found with no Geo Scanner and no plot", function()

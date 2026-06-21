@@ -1030,6 +1030,53 @@ local function serializeConf(c)
   return table.concat(o, "\n") .. "\n"
 end
 
+-- Discover how the ME Bridge hands materials to the turtle, so the operator can
+-- place the bridge on any side of a chest the turtle sits on/under (the common
+-- "turtle on a chest, bridge next to it" layout) without configuring a thing.
+-- A real exportItem(filter, side) pushes into the inventory on THAT side of the
+-- bridge; the turtle then sucks from the cell adjacent to itself. We probe each
+-- export side and the two vertical suck dirs (down/up - heading-independent, so
+-- they stay correct when restock re-parks) until a single probe item makes the
+-- full round trip from AE into a turtle slot. Returns { export_side, suck } or
+-- nil. A handful of probe items may be stranded on non-working sides; we prefer
+-- dirt (cheap, always needed) so that one-time cost is negligible.
+local CAL_EXPORT_SIDES = { "up", "down", "north", "south", "east", "west" }
+local CAL_SUCK_DIRS = { "down", "up" }
+local CAL_SLOT = 15  -- the scratch slot (conf.slots.scratch default)
+
+local function calibrateSupply(bridge0)
+  -- a probe AE definitely has in stock; dirt first, else anything stocked
+  local probe
+  local d = bridge0.getItem({ name = "minecraft:dirt" })
+  if d and (d.count or 0) > 0 then
+    probe = "minecraft:dirt"
+  else
+    for _, it in ipairs(bridge0.getItems() or {}) do
+      if (it.count or 0) > 0 then probe = it.name; break end
+    end
+  end
+  if not probe then return nil, "AE has no stock to calibrate the handoff with" end
+  for _, side in ipairs(CAL_EXPORT_SIDES) do
+    local n = bridge0.exportItem({ name = probe, count = 1 }, side)
+    if n and n > 0 then
+      for _, dir in ipairs(CAL_SUCK_DIRS) do
+        turtle.select(CAL_SLOT)
+        local ok = (dir == "up" and turtle.suckUp()) or turtle.suckDown()
+        if ok then
+          local got = turtle.getItemDetail(CAL_SLOT)
+          if got and got.name == probe then
+            return { export_side = side, suck = dir }
+          end
+        end
+      end
+      -- exported but unreachable from a vertical suck: the chest on this side
+      -- isn't directly above/below me. The probe is stranded; keep probing.
+    end
+  end
+  return nil, "exported but couldn't collect - put a chest above or below me, "
+    .. "with the bridge touching it"
+end
+
 local function runWizard(plotCount)
   print("farm: first run - setting myself up.")
   print("farm: looking for your sulfur plot...")
@@ -1052,6 +1099,20 @@ local function runWizard(plotCount)
     return false
   end
   print("farm: ME Bridge found (" .. tostring(bridgeName) .. ").")
+  -- probe how the bridge actually hands me items (which export side feeds a
+  -- chest I can suck from), so the bridge can go anywhere adjacent to the chest
+  local sup, serr = calibrateSupply(bridge0)
+  if sup then
+    print(("farm: supply calibrated (export %s -> suck %s).")
+      :format(sup.export_side, sup.suck))
+  else
+    -- fall back to the classic chest-directly-below-me handoff; the self-test
+    -- still proves the AE pull before any real plot, so a wrong guess aborts
+    -- loudly rather than building blind
+    print("farm: couldn't auto-calibrate the bridge handoff (" .. tostring(serr)
+      .. "); assuming a chest directly below me.")
+    sup = { export_side = "up", suck = "down" }
+  end
   plotCount = plotCount or DEFAULT_PLOTS
   -- drop frame: turtle = (0,0,0); the plot + build column hang off it
   local gen = {
@@ -1061,7 +1122,7 @@ local function runWizard(plotCount)
     build = { x = p.rx, y = p.ry + p.h, z = p.rz }, plots = plotCount,
     travel_y = p.ry + p.h + plotCount * p.h + 4,
     base = { bridge = bridgeName, park = { x = 0, y = 0, z = 0 },
-      suck = "down", export_side = "up" },
+      suck = sup.suck, export_side = sup.export_side },
     fleet = "farm1",
   }
   writeFile(CONF_PATH, serializeConf(gen))
@@ -1075,6 +1136,11 @@ local function runWizard(plotCount)
   end
   if not capture() then return false end
   navTo(cfg.start.x, cfg.start.y, cfg.start.z) -- home to the dock for the build
+  -- Leave me physically facing the heading boot() will assume. There is no
+  -- journal yet (the wizard does not journal), so the fresh build dead-reckons
+  -- from cfg.heading; capture's last move can leave me facing any direction, so
+  -- square up now or the whole stack builds rotated.
+  faceTo(cfg.start_heading or cfg.heading)
   return true
 end
 

@@ -597,14 +597,25 @@ function Env:addMeBridge(name, o)
     -- exported stack lands on env.ground at o.exportCell (the staging chest the
     -- turtle sucks from), carrying its behavior hooks so a pulled stack still
     -- places correctly.
-    exportItem = function(filter, _side)
+    exportItem = function(filter, side)
       local s = findItem(filter)
       if not s or (s.count or 0) <= 0 then return 0, "ITEM_NOT_FOUND" end
-      if not o.exportCell then return 0, "INVENTORY_NOT_FOUND" end
+      -- Side-aware delivery. o.deliver = { side, cell } models a chest on
+      -- exactly ONE side of the bridge (the operator's "bridge next to a
+      -- chest"): exporting to any other side finds no inventory, like the real
+      -- AP method. With no o.deliver, o.exportCell delivers on any side (the
+      -- back-compatible single-staging-cell tests).
+      local c
+      if o.deliver then
+        if side ~= o.deliver.side then return 0, "INVENTORY_NOT_FOUND" end
+        c = o.deliver.cell
+      else
+        if not o.exportCell then return 0, "INVENTORY_NOT_FOUND" end
+        c = o.exportCell
+      end
       local want = (type(filter) == "table" and filter.count) or 64
       local n = math.min(want, s.count)
       s.count = s.count - n
-      local c = o.exportCell
       local key = keyOf(c.x, c.y, c.z)
       local g = env.ground[key] or {}
       g[#g + 1] = { id = s.id, count = n, components = s.components,
