@@ -731,6 +731,34 @@ T("setup wizard: a bridge ON the turtle exports straight into it (no chest)", fu
     3, 3, 3, 0), 8, "copy built pulling straight into the turtle")
 end)
 
+-- An autocraft-heavy AE may keep NO raw stock (everything crafted on demand), so
+-- the handoff calibration has nothing stocked to push through. It must craft a
+-- probe (dirt, which the build needs anyway) instead of giving up and assuming a
+-- chest. Operator's base is exactly this - "autocraft anything it needs".
+T("setup wizard: calibrates the handoff when AE keeps no stock (crafts a probe)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "east", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 3, 74, 0, 3, 3)
+  -- everything is craftable but NOTHING is stocked (count 0): an autocraft base
+  local dirt = { id = "minecraft:dirt", count = 0, isCraftable = true }
+  local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0; hoe.isCraftable = true
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 0 })
+  seed.isCraftable = true
+  local water = env:waterBucketItem(); water.count = 0; water.isCraftable = true
+  local coal = { id = "minecraft:coal_block", count = 0, isCraftable = true }
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 0, craftSeconds = 1, items = { dirt, hoe, fert, seed, water, coal } })
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 80000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  local conf = loadTable(env:file("farm.conf"), "farm.conf")
+  eq(conf.base.suck, "self", "calibrated by crafting a probe, not assuming a chest")
+  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 3, 0), 8, "built by autocrafting everything from the ME")
+end)
+
 -- Heading calibration steps one block and reads the plot offset shift. At the
 -- scan-range edge the bbox MIN can "stick" on the boundary (the leaving block is
 -- replaced by its neighbour), so the old bbox-delta read 0 and failed. The

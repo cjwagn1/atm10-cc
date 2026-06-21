@@ -798,6 +798,7 @@ end
 -- (P0-2). intent() writes the mutating op to disk before it runs (C5).
 
 local bp              -- loaded blueprint
+local skipWarned = {} -- block ids we've already warned we're skipping (dedup)
 
 local function nameBelow()
   local h, i = turtle.inspectDown()
@@ -905,8 +906,11 @@ local function doBlock(id)
   -- harvest is external). A converge re-run re-checks, so adding a pattern later
   -- + re-running fills it in.
   if not ensureItem(cfg.slots.block, { name = id }, 1) then
-    print("farm: skipping " .. id .. " (not in AE / no craft pattern) - "
-      .. "place it yourself.")
+    if not skipWarned[id] then            -- warn once per id, not once per cell
+      print("farm: skipping " .. id .. " (not in AE / no craft pattern) - "
+        .. "place these yourself.")
+      skipWarned[id] = true
+    end
     broadcast{ state = "BUILD", skipped = id }
     return true
   end
@@ -1262,17 +1266,31 @@ local CAL_SUCK_DIRS = { "down", "up" }
 local CAL_SLOT = 15  -- the scratch slot (conf.slots.scratch default)
 
 local function calibrateSupply(bridge0)
-  -- a probe AE definitely has in stock; dirt first, else anything stocked
+  -- A probe to push through the handoff so we can see which side feeds the
+  -- turtle. Prefer something already in stock (dirt, else anything); if the AE
+  -- keeps NO raw stock (everything autocrafted on demand), craft one dirt - the
+  -- build needs dirt anyway, so it isn't wasted.
+  local function stockOf(name)
+    local it = bridge0.getItem({ name = name })
+    return it and it.count or 0
+  end
   local probe
-  local d = bridge0.getItem({ name = "minecraft:dirt" })
-  if d and (d.count or 0) > 0 then
+  if stockOf("minecraft:dirt") > 0 then
     probe = "minecraft:dirt"
   else
     for _, it in ipairs(bridge0.getItems() or {}) do
       if (it.count or 0) > 0 then probe = it.name; break end
     end
   end
-  if not probe then return nil, "AE has no stock to calibrate the handoff with" end
+  if not probe and bridge0.isCraftable({ name = "minecraft:dirt" }) then
+    bridge0.craftItem({ name = "minecraft:dirt", count = 1 })
+    local deadline = os.clock() + 60
+    while stockOf("minecraft:dirt") < 1 and os.clock() < deadline do os.sleep(0.5) end
+    if stockOf("minecraft:dirt") > 0 then probe = "minecraft:dirt" end
+  end
+  if not probe then
+    return nil, "AE has nothing stocked or craftable (dirt) to probe the handoff"
+  end
   local function countOf(name)
     local n = 0
     for s = 1, 16 do

@@ -982,6 +982,39 @@ T("wall: the BASE telemetry wall hides the chem source (it has its own wall)", f
   expectNotContains(m, "CHEM", "chem is kept off the base telemetry wall")
 end)
 
+T("wall: the BASE telemetry wall hides the farm builder source (farm*)", function()
+  -- the farm builder broadcasts build progress on "telemetry" too, but it
+  -- belongs on its own monitor (sources=farm*), not the base energy wall where it
+  -- only crowds out the flux tick rate.
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 50, baseH = 24 })
+  local flux = { v = 1, source = "flux",
+    data = { trueE = 2952790016, trueCap = 281474976710656, rate = 0 } }
+  local farm = { v = 1, source = "farm1", data = { state = "BUILD", plot = 0, dy = 1 } }
+  env:rednetAt(1.0, 7, flux, "telemetry")
+  env:rednetAt(1.3, 9, farm, "telemetry")
+  env:rednetAt(2.0, 7, flux, "telemetry")
+  current = env
+  env:run(WALL, {}, { maxTime = 3 })
+  local m = env:monitorText("monitor_2")
+  expectContains(m, "FLUX", "flux still shows on the base wall")
+  expectNotContains(m, "FARM", "farm telemetry is kept off the base wall")
+end)
+
+T("wall: a dedicated wall can still opt in to a fleet source (sources=farm*)", function()
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 50, baseH = 24 })
+  local farm = { v = 1, source = "farm1", data = { state = "BUILD", plot = 0, dy = 1 } }
+  env:rednetAt(1.0, 9, farm, "telemetry")
+  env:rednetAt(1.6, 9, farm, "telemetry")
+  current = env
+  env:run(WALL, { "sources=farm*" }, { maxTime = 3 })
+  expectContains(env:monitorText("monitor_2"), "FARM",
+    "an explicit sources=farm* wall shows the fleet source")
+end)
+
 T("mekdump: lists an attached machine and reads its rate methods", function()
   local env = CC.new{ termW = 51, termH = 19 }
   env:addPeripheral("reaction_chamber_0", { "pressurized_reaction_chamber" }, {

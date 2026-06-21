@@ -57,9 +57,24 @@ end
 -- explicitly asks for it
 local HIDE_BY_DEFAULT = { chem = true }
 
+-- The farm builder (source farm*) publishes build progress on "telemetry" too,
+-- but it belongs on its OWN monitor (`fluxwall sources=farm*`), not the base
+-- energy wall where it just crowds out the flux tick rate. Hide it by default.
+-- (Sleds keep their dedicated card - they get a sled-only wall via sources=sled*
+-- and don't reach the base wall from the mining dim.)
+local HIDE_PREFIXES = { "farm" }
+
+local function hiddenByDefault(name)
+  if HIDE_BY_DEFAULT[name] then return true end
+  for _, pre in ipairs(HIDE_PREFIXES) do
+    if name:sub(1, #pre) == pre then return true end
+  end
+  return false
+end
+
 local function passesFilter(name)
   if name == "alerts" then return true end          -- alerts always pass
-  if not sourceFilter then return not HIDE_BY_DEFAULT[name] end
+  if not sourceFilter then return not hiddenByDefault(name) end
   for _, p in ipairs(sourceFilter) do
     if p == "*" or p == name then return true end
     local prefix = p:match("^(.*)%*$")
