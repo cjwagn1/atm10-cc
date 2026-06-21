@@ -645,7 +645,10 @@ end
 function Env:addGeoScanner(name, o)
   o = o or {}
   local env = self
-  return self:addPeripheral(name, { "geoScanner" }, {
+  -- The real AP type is "geo_scanner" (GeoScannerPeripheral.PERIPHERAL_TYPE);
+  -- o.type lets a test register a different/odd string to prove findScanner's
+  -- scan()-method fallback still discovers an equipped upgrade.
+  return self:addPeripheral(name, { o.type or "geo_scanner" }, {
     scan = function(radius)
       if type(radius) ~= "number" then radius = 8 end
       if radius > (o.maxRadius or 16) then

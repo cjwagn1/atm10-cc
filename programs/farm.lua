@@ -286,9 +286,21 @@ local function isPlotBlock(name)
   return false
 end
 
+-- AP's Geo Scanner peripheral type is "geo_scanner" (GeoScannerPeripheral
+-- .PERIPHERAL_TYPE), NOT "geoScanner" - an equipped upgrade is found by the
+-- underscore name. Older builds/test-mods used the camelCase string, so try
+-- both; then, so a future rename can never resurrect the "no Geo Scanner"
+-- false alarm, fall back to ANY peripheral that exposes scan(). An equipped
+-- turtle upgrade IS a peripheral on the left/right side, so find() reaches it.
 local function findScanner()
   if not peripheral or not peripheral.find then return nil end
-  return peripheral.find("geoScanner")
+  local s = peripheral.find("geo_scanner") or peripheral.find("geoScanner")
+  if s then return s end
+  for _, n in ipairs(peripheral.getNames()) do
+    local ok, m = pcall(peripheral.wrap, n)
+    if ok and type(m) == "table" and type(m.scan) == "function" then return m end
+  end
+  return nil
 end
 
 -- Returns { rx, ry, rz (relative min corner), w, h, d, blocks } or nil + reason.

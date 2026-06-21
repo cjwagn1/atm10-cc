@@ -183,7 +183,7 @@ T("geo scanner: scan(radius) returns blocks relative to the turtle", function()
     { id = "farmingforblockheads:fertilized_farmland_healthy" }) -- +2 east
   env:setBlock(10, 63, 9, { id = "minecraft:stone" })            -- -1 y, -1 z
   env.files["prog.lua"] = [[
-    local s = peripheral.find("geoScanner")
+    local s = peripheral.find("geo_scanner")
     local out = fs.open("out", "w")
     local found = {}
     for _, b in ipairs(s.scan(4)) do
@@ -469,6 +469,39 @@ T("find: locates a sulfur plot it was never told about (Geo Scanner)", function(
   local res = env:run(FARM, { "find" }, { maxTime = 30 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   expectContains(env:termText(), "found a 3x3 plot", "located the plot by scanning")
+end)
+
+-- Real-world bug (operator report): the turtle HAD a Geo Scanner equipped but
+-- farm printed "no Geo Scanner equipped". AP's GeoScannerPeripheral.
+-- PERIPHERAL_TYPE is "geo_scanner" (underscore), NOT "geoScanner": peripheral
+-- .find("geoScanner") never matches an equipped scanner. The harness now
+-- registers the REAL type, so a stale camelCase find() must fail this.
+T("find: detects an equipped scanner under AP's real type 'geo_scanner'", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 70, z = 0 },
+    facing = "north", fuel = 100 } }
+  env:addGeoScanner("scanner") -- registers "geo_scanner" (the real AP type)
+  seedRefPlot(env, 4, 64, 0, 3, 3)
+  current = env
+  local res = env:run(FARM, { "find" }, { maxTime = 30 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "found a 3x3 plot",
+    "scanner detected via the real geo_scanner type")
+end)
+
+-- Bulletproofing: even if a future build renames the type, an equipped upgrade
+-- exposing scan() must still be found (so the operator never sees a false
+-- "no Geo Scanner" again). Register under an unexpected type and require the
+-- scan()-method fallback to discover it.
+T("find: falls back to any peripheral exposing scan() (odd type string)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 70, z = 0 },
+    facing = "north", fuel = 100 } }
+  env:addGeoScanner("scanner", { type = "ap_future_scanner" })
+  seedRefPlot(env, 4, 64, 0, 3, 3)
+  current = env
+  local res = env:run(FARM, { "find" }, { maxTime = 30 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "found a 3x3 plot",
+    "scanner found by scan()-method fallback despite an odd type")
 end)
 
 T("setup wizard: no config at all -> finds, calibrates, scans, builds a copy", function()
