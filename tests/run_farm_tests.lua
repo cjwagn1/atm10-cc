@@ -653,12 +653,13 @@ T("setup wizard: no config at all -> finds, calibrates, scans, builds a copy", f
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   expectContains(env:termText(), "found a 3x3 plot", "auto-found the plot")
   expectContains(env:termText(), "facing west", "calibrated its real heading")
-  -- the copy lands one plot-height ABOVE the operator's plot: soil at y76
-  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
-    3, 3, 3, 0), 8, "copy soil ring built above the plot")
-  eq(countLayer(env, 77, "mysticalagriculture:sulfur_crop", 3, 3, 3, 0), 8,
+  -- the copy lands one plot-height ABOVE the operator's plot PLUS the default
+  -- clearance gap (3): captured top y75 -> base y76 + 3 = soil at y79
+  eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 3, 0), 8, "copy soil ring built a clearance gap above the plot")
+  eq(countLayer(env, 80, "mysticalagriculture:sulfur_crop", 3, 3, 3, 0), 8,
     "copy crops")
-  eq(env:block(4, 76, 1) and env:block(4, 76, 1).id, "minecraft:water",
+  eq(env:block(4, 79, 1) and env:block(4, 79, 1).id, "minecraft:water",
     "copy center water")
   eq(env:file("farm.conf") ~= nil, true, "wrote its own config for reboots")
 end)
@@ -691,7 +692,8 @@ T("setup wizard: auto-calibrates the bridge handoff (export side + suck dir)", f
   eq(conf.base.export_side, "south", "discovered the working export side")
   eq(conf.base.suck, "up", "discovered the working suck dir")
   -- and the build actually completes pulling through the calibrated handoff
-  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+  -- (soil at base y76 + clearance 3 = y79)
+  eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
     3, 3, 3, 0), 8, "copy built via the calibrated supply path")
 end)
 
@@ -764,13 +766,14 @@ T("setup wizard (no scanner): finds the plot on foot and builds a copy", functio
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   expectContains(env:termText(), "found a 3x3 plot", "found the plot on foot")
   expectContains(env:termText(), "no Geo Scanner", "told the operator it searched on foot")
-  -- copy soil one plot-height above the original (soil y64, h2 -> copy soil y66);
-  -- footprint ox=1,oz=0 mirrors the seeded plot at (1,64,0)
-  eq(countLayer(env, 66, "farmingforblockheads:fertilized_farmland_healthy",
-    3, 3, 1, 0), 8, "copy soil ring built above the plot")
-  eq(countLayer(env, 67, "mysticalagriculture:sulfur_crop", 3, 3, 1, 0), 8,
+  -- copy soil one plot-height above the original PLUS the default clearance gap
+  -- (soil y64, h2 -> base y66 + clearance 3 = copy soil y69); footprint ox=1,oz=0
+  -- mirrors the seeded plot at (1,64,0)
+  eq(countLayer(env, 69, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 1, 0), 8, "copy soil ring built a clearance gap above the plot")
+  eq(countLayer(env, 70, "mysticalagriculture:sulfur_crop", 3, 3, 1, 0), 8,
     "copy crops")
-  eq(env:block(2, 66, 1) and env:block(2, 66, 1).id, "minecraft:water",
+  eq(env:block(2, 69, 1) and env:block(2, 69, 1).id, "minecraft:water",
     "copy center water")
 end)
 
@@ -827,7 +830,7 @@ T("setup wizard: a bridge ON the turtle exports straight into it (no chest)", fu
   local conf = loadTable(env:file("farm.conf"), "farm.conf")
   eq(conf.base.suck, "self", "detected the direct-into-turtle handoff")
   eq(conf.base.export_side, "north", "recorded the export side that feeds me")
-  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+  eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
     3, 3, 3, 0), 8, "copy built pulling straight into the turtle")
 end)
 
@@ -855,7 +858,7 @@ T("setup wizard: calibrates the handoff when AE keeps no stock (crafts a probe)"
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   local conf = loadTable(env:file("farm.conf"), "farm.conf")
   eq(conf.base.suck, "self", "calibrated by crafting a probe, not assuming a chest")
-  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+  eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
     3, 3, 3, 0), 8, "built by autocrafting everything from the ME")
 end)
 
@@ -886,7 +889,7 @@ T("supply: a stocked hoe is pulled instead of crafting a stalling diamond one", 
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 200000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   eq(diamond.count, 0, "never scheduled the stalling diamond-hoe craft")
-  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+  eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
     3, 3, 3, 0), 8, "built using the stocked stone hoe")
 end)
 
@@ -914,7 +917,7 @@ T("supply: a stalling-only hoe halts with an actionable message, builds nothing"
   local t = env:termText()
   expectContains(t, "no hoe", "halted on the hoe and said so")
   expectContains(t, "slot 2", "told the operator which slot to drop a hoe in")
-  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+  eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
     3, 3, 3, 0), 0, "built nothing without a hoe (no silent partial)")
 end)
 
@@ -945,8 +948,9 @@ T("setup wizard: homes back over the plot so restock can still reach the bridge"
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 250000 })
   expectNotContains(env:termText(), "isn't in reach", "got back to the dock + reached the bridge")
   expectNotContains(env:termText(), "no-hoe", "restocked the hoe (frame not offset)")
-  eq(countLayer(env, 65, "farmingforblockheads:fertilized_farmland_healthy", 3, 3, 3, 0),
-    8, "built the copy above the existing plot (frame stayed true)")
+  -- soil base y65 + default clearance 3 = y68
+  eq(countLayer(env, 68, "farmingforblockheads:fertilized_farmland_healthy", 3, 3, 3, 0),
+    8, "built the copy a clearance gap above the existing plot (frame stayed true)")
 end)
 
 -- Heading calibration steps one block and reads the plot offset shift. At the
@@ -970,7 +974,7 @@ T("setup wizard: reads heading even when a step pushes the plot to the range edg
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   expectContains(env:termText(), "facing east", "read the true heading despite the edge step")
-  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+  eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
     3, 3, -8, 0), 8, "copy built at the correct (un-rotated) location")
 end)
 
@@ -996,7 +1000,7 @@ T("setup wizard: detects an ME Bridge whose type is camelCase 'meBridge'", funct
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   expectContains(env:termText(), "ME Bridge found", "found the camelCase-typed bridge")
-  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+  eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
     3, 3, 3, 0), 8, "built after detecting the bridge")
 end)
 
@@ -1041,11 +1045,12 @@ T("setup wizard: centers the stack over a ground-floor ender chest", function()
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 80000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   expectContains(env:termText(), "aligning the stack", "aligned to the ender chest")
-  -- centered over the chest at x4 -> build.x = 4 - floor(5/2) = 2 -> soil x2..6
-  eq(env:block(2, 75, 0) and env:block(2, 75, 0).id,
+  -- centered over the chest at x4 -> build.x = 4 - floor(5/2) = 2 -> soil x2..6;
+  -- soil layer at captured-top y74 + naive base 1 + default clearance 3 = y78
+  eq(env:block(2, 78, 0) and env:block(2, 78, 0).id,
     "farmingforblockheads:fertilized_farmland_healthy",
     "aligned soil reaches the chest-centered x2")
-  eq(env:block(7, 75, 0), nil, "NOT at the un-aligned bbox-corner x7")
+  eq(env:block(7, 78, 0), nil, "NOT at the un-aligned bbox-corner x7")
 end)
 
 T("reset: wipes config, blueprint, and journal back to first-run state", function()
@@ -1109,6 +1114,67 @@ T("ae: the craft probe confirms OK when the AE can finish the craft", function()
   current = env
   env:run(FARM, { "ae" }, { maxTime = 60 })
   expectContains(env:termText(), "craft probe: OK", "confirmed a working autocraft")
+end)
+
+-- `farm diag` is the operator's ground-truth capability self-test: a FAST check
+-- (no ~6-minute plot scan) that exercises every real-world capability the build
+-- depends on - AE stock pull, AE craft, place dirt, SIDE-TILL, fertilize, plant,
+-- water - in a CLEAR test column it rises into, reports PASS/FAIL per capability,
+-- then cleans up every block it placed so it never damages the operator's farm.
+-- The side-till PASS is the load-bearing one: it proves the till works in clear
+-- air, so an in-game build halt is geometry (buried base), not a capability bug.
+T("diag: capability self-test reports every capability PASS and leaves no mess", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "north", fuel = 50000 } }
+  -- a minimal conf so loadConf supplies the slot/item defaults diag pulls against
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 0, z = 0 }, size = { w = 1, h = 1, d = 1 },
+    heading = "north", scan_y = 2,
+    start = { x = 0, y = 64, z = 0 }, start_heading = "north",
+    build = { x = 0, y = 0, z = 0 }, plots = 1, fleet = "farm1",
+  }]]
+  -- a full AE: dirt STOCKED, hoe CRAFTABLE (build needs to craft one), seed/fert/
+  -- water stocked. On-turtle bridge feeding straight into the turtle.
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0; hoe.isCraftable = true
+  local fert = env:fertilizerItem{ count = 64 }
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 64 })
+  local water = env:waterBucketItem(); water.count = 16
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 5, craftSeconds = 1, items = { dirt, hoe, fert, seed, water } })
+  current = env
+  local res = env:run(FARM, { "diag" }, { maxTime = 4000 })
+  eq(res.reason, "done", "diag ran (err=" .. tostring(res.err) .. ")")
+  -- the full per-step narrative (PASS/FAIL per capability) is captured in the log;
+  -- the CC terminal can't scroll, so the early step lines scroll off - the log is
+  -- the operator's record (share with `pastebin put farm.log`)
+  local log = env:file("farm.log") or ""
+  -- every capability the build depends on reported PASS, in colon form per step
+  expectContains(log, "AE STOCK PULL: PASS", "stock pull works")
+  expectContains(log, "AE CRAFT: PASS", "ran the craft probe")
+  expectContains(log, "PLACE DIRT: PASS", "placed dirt in clear air")
+  expectContains(log, "SIDE-TILL: PASS", "tilled from the side in clear air (the key proof)")
+  expectContains(log, "FERTILIZE: PASS", "fertilized the farmland")
+  expectContains(log, "PLANT: PASS", "planted a sulfur seed")
+  expectContains(log, "WATER: PASS", "placed a water source with a brace")
+  expectContains(log, "CLEAN UP: PASS", "cleaned up every test block")
+  -- the end-of-run summary block + one-line verdict survive on the terminal
+  local t = env:termText()
+  expectContains(t, "capability summary", "printed a summary block")
+  expectContains(t, "all capabilities PASS", "a clear one-line verdict")
+  -- CLEAN UP: every block diag placed is removed - the test column is clear air
+  -- again (above the dock at y64), so it never damages the operator's farm
+  for dy = 1, 6 do
+    for dx = -1, 1 do
+      for dz = -1, 1 do
+        local b = env:block(dx, 64 + dy, dz)
+        if b then
+          fail(("diag left a block %s at %d,%d,%d - it must clean up")
+            :format(b.id, dx, 64 + dy, dz))
+        end
+      end
+    end
+  end
 end)
 
 T("ae: an empty/disconnected bridge shows 0 item types and PULL FAILED", function()
@@ -1554,6 +1620,93 @@ T("build: stacks 2 plots, plot N+1 base = plot N base + height", function()
   eq(countLayer(env, 102, "farmingforblockheads:fertilized_farmland_healthy"),
     9, "plot1 soil at base+height")
   eq(countLayer(env, 103, "mysticalagriculture:sulfur_crop"), 9, "plot1 crops")
+end)
+
+-- ----------------------------------------------------- clearance / buried base
+-- THE in-game halt (operator's farm.log): the operator's existing farm is, bottom
+-- up, DIRT -> PLANT -> GROWTH ACCELERATOR -> ULTIMATE CABLE (4 layers), but the
+-- capture is h=3 and MISSES the top cable layer. So the build base
+-- Y0 = origin.y + size.h lands ON the (un-captured) cable level, and the turtle
+-- places its first dirt block buried inside the existing canopy: ALL FOUR
+-- horizontal neighbours - at both the soil layer and the stance layer above it -
+-- are occupied by the canopy, so the v49 side-till can never drop beside the dirt
+-- to till it from the side. tillBelowFromSide returns false and doSoil halts
+-- "till". The side-till is CORRECT; it just has nowhere to stand.
+--
+-- The OLD harness hid this: the build tests seed the build column in OPEN AIR with
+-- clear neighbours, so side-till passes there while it fails in-game. These tests
+-- MODEL the canopy around the build base, so the no-clear-neighbour halt is
+-- reproducible, and prove the clearance fix lifts the base into clear air.
+
+-- Fill the four horizontal neighbours of the column (x,z) with canopy blocks at
+-- BOTH the soil layer ySoil and the stance layer ySoil+1 - the two layers the
+-- side-till needs clear to step into a neighbour and drop beside the dirt. This is
+-- the operator's existing farm canopy (accelerators/cables) pressed against the
+-- buried build column.
+local function surroundColumnWithCanopy(env, x, ySoil, z)
+  for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+    env:setBlock(x + d[1], ySoil, z + d[2], { id = "mysticalagriculture:essence_farmland" })
+    env:setBlock(x + d[1], ySoil + 1, z + d[2], { id = "ae2:cable" })
+  end
+end
+
+-- A build rig whose conf build.y is derived from the wizard's formula
+-- (origin.y + size.h + clearance), so a clearance of 0 buries the base on the
+-- canopy level (modelled by surroundColumnWithCanopy) and the default 3 lifts it
+-- into clear air. The reference plot's captured top is origin.y + size.h - 1; the
+-- un-captured cable layer sits one above that, exactly where clearance=0 builds.
+local function clearanceRig(clearance, blueprint)
+  local oy, h = 64, 2
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 50000 } }
+  env.files["farm.blueprint"] = blueprint or BP_3x3_NOWATER
+  local buildY = oy + h + clearance
+  env.files["farm.conf"] = ([[return {
+    origin = { x = 0, y = %d, z = 0 }, size = { w = 3, h = %d, d = 3 },
+    heading = "east", lateral = "south", scan_y = %d,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = %d, z = 0 }, clearance = %d, plots = 1, fleet = "farm1",
+  }]]):format(oy, h, oy + h + 1, buildY, clearance)
+  env.turtle.inv = {
+    [1] = { id = "minecraft:dirt", count = 64 },
+    [2] = env:hoeItem{ durability = 2000 },
+    [3] = env:fertilizerItem{ count = 64 },
+    [4] = env:seedItem("mysticalagriculture:sulfur_crop", { count = 64 }),
+    [5] = env:waterBucketItem(),
+  }
+  -- model the existing farm canopy at its FIXED world level: the un-captured cable
+  -- layer sits one above the captured plot top (origin.y + size.h = the buried
+  -- base for clearance 0). The build base moves UP with clearance, away from this
+  -- fixed canopy - so clearance 0 builds INTO it, the default clears it.
+  surroundColumnWithCanopy(env, 0, oy + h, 0)
+  return env, buildY
+end
+
+-- RED-proves the bug: with clearance 0 the build base lands on the canopy level
+-- and the side-till has no clear neighbour to drop beside the dirt -> halts "till".
+T("clearance: build base buried in the canopy halts the till (no clear side)", function()
+  local env = clearanceRig(0)
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 9000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "halted", "the buried build halts loudly")
+  expectContains(env:termText(), "till", "it halts on the side-till (no clear neighbour)")
+  -- and it built NO soil layer (the very first cell could not be tilled)
+  eq(countLayer(env, 64 + 2, "farmingforblockheads:fertilized_farmland_healthy"),
+    0, "no soil fertilized - the build never got past the first buried cell")
+end)
+
+-- GREEN: with the default clearance the wizard's formula lifts the base ABOVE the
+-- canopy into clear air, so the same canopy does not block the side-till and the
+-- soil layer builds.
+T("clearance: the default gap lifts the base into clear air and the soil builds", function()
+  local env, buildY = clearanceRig(3)
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 9000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "halted", "the clear-air build does not halt")
+  eq(countLayer(env, buildY, "farmingforblockheads:fertilized_farmland_healthy"),
+    9, "all 9 soil cells fertilized in clear air above the canopy")
 end)
 
 -- A captured farm includes infrastructure blocks the turtle can't reproduce: an

@@ -13,6 +13,9 @@ Commands:
   farm capture     inspect-traversal of the reference plot -> farm.blueprint
   farm build       self-test, then build the stack (resumes if interrupted)
   farm selftest    run the startup self-tests only, build nothing
+  farm diag        FAST capability self-test (no plot scan): pull/craft/place/
+                   till/fertilize/plant/water in a clear column, PASS/FAIL each,
+                   then clean up. Proves what works in-game in seconds.
   farm ae          diagnose the AE link (stock pull + a real craft probe)
   farm log         show the debug log (on|off step trace, clear); share it with
                    `pastebin put farm.log`
@@ -107,6 +110,12 @@ local function loadConf()
   conf.fuel_low = conf.fuel_low or 1000
   conf.fuel_reserve = conf.fuel_reserve or 200
   conf.plots = conf.plots or 1
+  -- vertical gap between the existing farm's top and the first copy's soil layer.
+  -- The capture height misses the top (un-captured) canopy layer (cables), so the
+  -- naive build base (origin.y + size.h) lands ON that canopy and the side-till
+  -- has no clear neighbour to drop beside the dirt -> halt "till". Start the stack
+  -- a few blocks ABOVE the farm in clear air. Honoured from an edited conf.
+  conf.clearance = conf.clearance or 3
   -- AE item ids the builder pulls/crafts. Seeds are derived per crop from the
   -- blueprint; these are the fixed ones.
   conf.items = conf.items or {}
@@ -1671,6 +1680,7 @@ local function serializeConf(c)
   o[#o + 1] = ("  heading = %q, scan_y = %d,"):format(c.heading, c.scan_y)
   o[#o + 1] = ("  build = %s, plots = %d, travel_y = %d,")
     :format(ptStr(c.build), c.plots, c.travel_y)
+  if c.clearance then o[#o + 1] = ("  clearance = %d,"):format(c.clearance) end
   o[#o + 1] = "  base = {"
   if c.base.bridge then o[#o + 1] = ("    bridge = %q,"):format(c.base.bridge) end
   o[#o + 1] = ("    park = %s, suck = %q, export_side = %q,")
@@ -1842,13 +1852,22 @@ local function runWizard(plotCount)
     bz = anchor.z - math.floor(p.d / 2)
     print("farm: aligning the stack centred over an ender chest.")
   end
+  -- The captured height (p.h) MISSES the existing farm's top canopy layer (the
+  -- cables sit one above the scanned plot), so a build base at p.ry + p.h lands ON
+  -- that canopy and the first dirt block is buried - the side-till then has no
+  -- clear neighbour to drop beside it and the build halts "till". Start the soil
+  -- layer a clearance gap ABOVE the farm, in clear air. Raise travel_y to match so
+  -- the restock corridor still clears the whole stack.
+  local clearance = (cfg and cfg.clearance) or 3
+  local buildY = p.ry + p.h + clearance
+  print(("farm: starting the stack %d blocks above your farm (clear air)."):format(clearance))
   -- drop frame: turtle = (0,0,0); the plot + build column hang off it
   local gen = {
     start = { x = 0, y = 0, z = 0 }, start_heading = heading, heading = heading,
     origin = { x = p.rx, y = p.ry, z = p.rz },
     size = { w = p.w, h = p.h, d = p.d }, scan_y = p.ry + p.h + 1,
-    build = { x = bx, y = p.ry + p.h, z = bz }, plots = plotCount,
-    travel_y = p.ry + p.h + plotCount * p.h + 4,
+    build = { x = bx, y = buildY, z = bz }, plots = plotCount, clearance = clearance,
+    travel_y = buildY + plotCount * p.h + 4,
     base = { bridge = bridgeName, park = { x = 0, y = 0, z = 0 },
       suck = sup.suck, export_side = sup.export_side, bridge_facing = bridgeFacing },
     fleet = "farm1",
@@ -1925,7 +1944,7 @@ local HOLD_PATH = "farm.hold"
 if cmd == "hold" then
   writeFile(HOLD_PATH, "held\n")
   print("farm: HELD - I won't auto-build on boot.")
-  print("  inspect freely: 'farm ae', 'farm capture', 'farm find'.")
+  print("  inspect freely: 'farm diag', 'farm ae', 'farm capture', 'farm find'.")
   print("  then 'farm go' to build, or 'farm release' to just clear the hold.")
   return
 end
@@ -2118,6 +2137,272 @@ if cmd == "ae" then
   return
 end
 
+-- `farm diag`: the operator's ground-truth capability self-test. A FAST check
+-- (NO ~6-minute plot scan) that exercises EVERY real-world capability the build
+-- depends on - AE stock pull, AE craft, place dirt, side-till, fertilize, plant,
+-- water - in a CLEAR test column it rises into above the dock, reports PASS/FAIL
+-- per capability, then digs up every block it placed so it never damages the
+-- operator's farm. The side-till PASS is the load-bearing one: it proves the till
+-- works in clear air, so a build halt is geometry (a buried base), not a missing
+-- capability. Every step is guarded - a single failure marks FAIL, continues, and
+-- the placed blocks are still cleaned up. Safe to run repeatedly.
+if cmd == "diag" then
+  -- diag self-tests in a fixed column; it doesn't read a conf's plot geometry, so
+  -- synthesize the slot/item defaults if there's no farm.conf yet.
+  if not cfg then
+    writeFile(CONF_PATH, "return { origin = { x = 0, y = 0, z = 0 },"
+      .. " size = { w = 1, h = 1, d = 1 }, heading = \"north\","
+      .. " start = { x = 0, y = 0, z = 0 }, start_heading = \"north\","
+      .. " build = { x = 0, y = 0, z = 0 } }")
+    cfg = loadConf()
+    fs.delete(CONF_PATH) -- a throwaway: diag never persists a config
+  end
+  refuelFromInventory(2000)
+  -- a free-frame state so faceTo/goFwd/goUp journal-safely (journaling stays OFF,
+  -- like selftest - diag writes no build journal)
+  S = { pos = { x = 0, y = 0, z = 0 }, heading = "north", phase = "diag" }
+  local results, placed = {}, {} -- placed = cells diag put blocks in, to clean up
+  local function mark(name, ok, note)
+    results[#results + 1] = { name = name, ok = ok, note = note }
+    print(("  %s: %s%s"):format(name, ok and "PASS" or "FAIL",
+      note and ("  (" .. note .. ")") or ""))
+  end
+  local function step(name, fn)
+    local ok, res, note = pcall(fn)
+    if not ok then mark(name, false, "errored: " .. tostring(res))
+    else mark(name, res and true or false, note) end
+  end
+
+  local b, bname = findBridge()
+  if not b then
+    print("farm diag: no ME Bridge found - mount one ON me (or wire it), reboot.")
+    return
+  end
+  print("farm diag: bridge = " .. tostring(bname))
+  local function bcall(m, ...)
+    if type(b[m]) ~= "function" then return nil end
+    local ok, r = pcall(b[m], ...)
+    return ok and r or nil
+  end
+  print(("  connected=%s online=%s"):format(
+    tostring(bcall("isConnected")), tostring(bcall("isOnline"))))
+
+  -- export `name` x`count` from AE and collect it into `slot` by whatever handoff
+  -- works (straight into me, or a chest above/below I suck) - diag's own pull,
+  -- independent of the build's park navigation.
+  local function pullItem(slot, name, count)
+    local function invCount()
+      local n = 0
+      for s = 1, 16 do
+        local d = turtle.getItemDetail(s)
+        if d and d.name == name then n = n + turtle.getItemCount(s) end
+      end
+      return n
+    end
+    local before = invCount()
+    for _, side in ipairs(CAL_EXPORT_SIDES) do
+      local n = bcall("exportItem", { name = name, count = count or 1 }, side)
+      if type(n) == "number" and n > 0 then
+        if invCount() > before then break end
+        turtle.select(slot)
+        if turtle.suckDown() or turtle.suckUp() then break end
+      end
+    end
+    -- gather every stack of `name` into the work slot (the build's fixed-slot rule)
+    for s = 1, 16 do
+      if s ~= slot then
+        local d = turtle.getItemDetail(s)
+        if d and d.name == name then turtle.select(s); turtle.transferTo(slot) end
+      end
+    end
+    turtle.select(slot)
+    return invCount() >= (count or 1)
+  end
+
+  -- AE STOCK PULL: a stocked item (dirt) must reach the turtle
+  step("AE STOCK PULL", function()
+    return pullItem(cfg.slots.dirt, cfg.items.dirt, 1), cfg.items.dirt
+  end)
+
+  -- AE CRAFT: craft the configured hoe (or report it is already stocked) - reuse
+  -- the 'farm ae' craft-probe shape: a pattern existing is NOT a finished job.
+  step("AE CRAFT", function()
+    local hoeName = cfg.items.hoe
+    local h0 = bcall("getItem", { name = hoeName })
+    if type(h0) == "table" and (h0.count or 0) > 0 then
+      return true, hoeName .. " already stocked"
+    end
+    if not (type(h0) == "table" and h0.isCraftable) then
+      return false, hoeName .. " neither stocked nor craftable"
+    end
+    bcall("craftItem", { name = hoeName, count = 1 })
+    local deadline = os.clock() + (cfg.craft_timeout or 15)
+    while os.clock() < deadline do
+      local it = bcall("getItem", { name = hoeName })
+      if it and (it.count or 0) > 0 then return true, "crafted " .. hoeName end
+      os.sleep(0.5)
+    end
+    return false, "craft STALLED (no free CPU / missing ingredient)"
+  end)
+
+  -- RISE into clear air above the dock: probe up until detectUp() is false AND the
+  -- four horizontal neighbours at the stance cell are clear, so the build
+  -- primitives are tested where they are SUPPOSED to work (open air) - isolating a
+  -- capability bug from the build-geometry (buried-base) bug. Cap the rise so a
+  -- ceiling never loops forever.
+  local function clearHorizontal()
+    local saved = S.heading
+    local clear = true
+    for _, dir in ipairs({ "north", "south", "east", "west" }) do
+      faceTo(dir)
+      if turtle.detect() then clear = false; break end
+    end
+    faceTo(saved)
+    return clear
+  end
+  local rose = false
+  for _ = 1, 8 do
+    if not turtle.detectUp() and clearHorizontal() then rose = true; break end
+    if not goUp() then break end
+  end
+  -- one more step up so the WORK cell (placeDown target) is clear below the stance
+  if rose then rose = goUp() end
+  mark("RISE TO CLEAR AIR", rose,
+    rose and ("stance " .. S.pos.y .. " above the dock") or "no clear test cell")
+
+  -- A clear ceiling one above the tallest test block (the crop at Ys): move OVER a
+  -- column at this height, never crossing a placed block in another column, then
+  -- descend. Both the work steps and the top-down cleanup navigate through it.
+  local ceilY = S.pos.y + 1
+  local function toCell(tx, ty, tz)
+    if not navTo(S.pos.x, ceilY, S.pos.z) then return false end -- rise to the clear ceiling
+    if not navTo(tx, ceilY, tz) then return false end           -- over the target column
+    return navTo(tx, ty, tz)                                     -- descend in it
+  end
+
+  if rose then
+    -- Fixed test geometry, all in clear air above the dock (Ys = the clear stance
+    -- the rise found). The soil column is at (sx,sz); the work cell is one BELOW
+    -- the stance, exactly like the build (placeDown). The water column is one east.
+    -- Record ABSOLUTE cells (S.pos moves during the run) so cleanup is exact.
+    local sx, sz, Ys = S.pos.x, S.pos.z, S.pos.y
+    local soilY = Ys - 1       -- dirt/farmland/fertilized + crop one above (at Ys)
+    local function noteAbs(x, y, z) placed[#placed + 1] = { x = x, y = y, z = z } end
+
+    -- PLACE DIRT below the stance and read it back
+    step("PLACE DIRT", function()
+      if not pullItem(cfg.slots.dirt, cfg.items.dirt, 1) then
+        return false, "no dirt from AE"
+      end
+      turtle.select(cfg.slots.dirt)
+      if not turtle.placeDown() then return false, "placeDown refused" end
+      noteAbs(sx, soilY, sz)
+      local h, i = turtle.inspectDown()
+      return h and i.name == cfg.items.dirt, "placed " .. tostring(h and i.name)
+    end)
+
+    -- SIDE-TILL the dirt -> farmland (the key proof: works in clear air)
+    step("SIDE-TILL", function()
+      pullItem(cfg.slots.hoe, cfg.items.hoe, 1)
+      tillBelowFromSide()
+      local h, i = turtle.inspectDown()
+      return h and i.name == "minecraft:farmland", "below is " .. tostring(h and i.name)
+    end)
+
+    -- FERTILIZE -> fertilized_farmland_healthy
+    step("FERTILIZE", function()
+      if not pullItem(cfg.slots.fertilizer, cfg.items.fertilizer, 1) then
+        return false, "no fertilizer from AE"
+      end
+      turtle.select(cfg.slots.fertilizer); turtle.placeDown()
+      local h, i = turtle.inspectDown()
+      return h and i.name == FERTILIZED_SOIL, "below is " .. tostring(h and i.name)
+    end)
+
+    -- PLANT a sulfur seed: the crop sits at Ys (the stance) over the farmland at
+    -- soilY; rise to Ys+1 and placeDown the seed onto the farmland below. The
+    -- turtle STAYS at Ys+1 afterwards (descending would re-enter the crop cell);
+    -- every later step navigates by explicit coords, so the stance doesn't matter.
+    local seedId = "mysticalagriculture:sulfur_seeds"
+    step("PLANT", function()
+      if not navTo(sx, Ys + 1, sz) then return false, "couldn't rise to plant" end
+      if not pullItem(cfg.slots.seed, seedId, 1) then return false, "no seed from AE" end
+      turtle.select(cfg.slots.seed); turtle.placeDown()
+      local h, i = turtle.inspectDown()
+      local planted = h and i.name and i.name:find("crop", 1, true) ~= nil
+      if planted then noteAbs(sx, Ys, sz) end -- crop cell at Ys
+      return planted, "below is " .. tostring(h and i.name)
+    end)
+
+    -- WATER one cell east of the soil column: a dirt brace at soilY-1 and a water
+    -- source above it at soilY. The water column is clear (the test cells are all
+    -- in the soil column), so toCell moves OVER to it at the clear ceiling first,
+    -- then descends - never crossing the crop/farmland in the soil column.
+    local wx, wz = sx + 1, sz
+    step("WATER", function()
+      -- lay the brace at (wx, soilY-1) from the cell directly above it
+      if not toCell(wx, soilY, wz) then return false, "no clear water column" end
+      if not turtle.detectDown() then
+        if not pullItem(cfg.slots.dirt, cfg.items.dirt, 1) then
+          return false, "no dirt for the brace"
+        end
+        turtle.select(cfg.slots.dirt); turtle.placeDown()
+      end
+      if not turtle.detectDown() then return false, "brace did not place" end
+      noteAbs(wx, soilY - 1, wz)
+      -- rise one and place the water source at (wx, soilY) onto the brace below
+      if not goUp() then return false, "couldn't rise over the brace" end
+      if not pullItem(cfg.slots.water, cfg.items.water, 1) then
+        return false, "no water bucket from AE"
+      end
+      turtle.select(cfg.slots.water)
+      if not turtle.placeDown() then return false, "bucket placeDown refused" end
+      local h, i = turtle.inspectDown()
+      local ok = h and i.name == "minecraft:water"
+      if ok then noteAbs(wx, soilY, wz) end
+      -- evacuate the emptied bucket so the slot is clean for a re-run
+      local d = turtle.getItemDetail(cfg.slots.water)
+      if d and d.name ~= cfg.items.water then
+        turtle.select(cfg.slots.water); turtle.dropUp()
+      end
+      return ok, ok and "water source placed on the brace" or "water didn't place"
+    end)
+  end
+
+  -- CLEAN UP: remove every block diag placed so it leaves NO mess, then return to
+  -- the dock. Dig TOP-DOWN (highest y first) so a block is never approached
+  -- through another test block: toCell moves to the clear cell directly above each
+  -- recorded cell (over the ceiling, then down) and digDown. digDown removes a
+  -- water source too (a fluid reads detectDown()==false, so dig unconditionally).
+  table.sort(placed, function(a, b) return a.y > b.y end)
+  local cleaned = true
+  for _, c in ipairs(placed) do
+    turtle.select(cfg.slots.scratch)
+    if not toCell(c.x, c.y + 1, c.z) then cleaned = false
+    else
+      local ok = turtle.digDown()
+      if not ok and turtle.detectDown() then cleaned = false end
+    end
+  end
+  navTo(0, 0, 0); faceTo("north") -- return to the dock
+  mark("CLEAN UP", cleaned, cleaned and "removed every test block" or "left a block")
+
+  -- summary block + one-line verdict
+  print("farm diag: ---- capability summary ----")
+  local allPass = true
+  for _, r in ipairs(results) do
+    if not r.ok then allPass = false end
+    print(("  %-18s %s"):format(r.name, r.ok and "PASS" or "FAIL"))
+  end
+  if allPass then
+    print("farm diag: VERDICT - all capabilities PASS. A build halt is geometry,")
+    print("  not capability (run with the default clearance to clear the canopy).")
+  else
+    print("farm diag: VERDICT - one or more capabilities FAILED (see above).")
+  end
+  return
+end
+
 if cmd == "find" then
   local radius = tonumber(args[2]) or SCAN_RADIUS
   local p, why = findPlot(radius)
@@ -2213,7 +2498,8 @@ elseif cmd == "selftest" then
   return
 else
   print("farm: unknown command '" .. tostring(cmd) .. "'")
-  print("usage: farm [setup|build|capture|selftest|ae|find|reset]")
+  print("usage: farm [setup|build|capture|selftest|diag|ae|find|reset]")
+  print("       farm diag                  (fast capability self-test, no scan)")
   print("       farm hold | go | release   (park before it auto-builds)")
   print("       farm log [on|off|clear]    (debug log -> pastebin put farm.log)")
   return
