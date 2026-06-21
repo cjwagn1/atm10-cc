@@ -638,6 +638,39 @@ function Env:addMeBridge(name, o)
   })
 end
 
+-- AP Geo Scanner (type "geoScanner"): scan(radius) returns every block in a
+-- cube of half-extent `radius` around the turtle, coords RELATIVE to it (the
+-- shape the turtle uses to FIND a plot it was never told the location of). Air
+-- is omitted, like the real scanner. Reads the live voxel world.
+function Env:addGeoScanner(name, o)
+  o = o or {}
+  local env = self
+  return self:addPeripheral(name, { "geoScanner" }, {
+    scan = function(radius)
+      if type(radius) ~= "number" then radius = 8 end
+      if radius > (o.maxRadius or 16) then
+        return nil, "Radius exceeds the maximum of " .. (o.maxRadius or 16)
+      end
+      local t = env.turtle
+      if not t then return nil, "No turtle" end
+      local out = {}
+      for k, b in pairs(env.world) do
+        local x, y, z = k:match("^(-?%d+),(-?%d+),(-?%d+)$")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        local dx, dy, dz = x - t.pos.x, y - t.pos.y, z - t.pos.z
+        if math.abs(dx) <= radius and math.abs(dy) <= radius
+          and math.abs(dz) <= radius then
+          out[#out + 1] = { name = b.id, x = dx, y = dy, z = dz,
+            tags = b.tags or {} }
+        end
+      end
+      return out
+    end,
+    cost = function(radius) return (radius or 8) end,
+    getScanCooldown = function() return 0 end,
+  })
+end
+
 -- AP Chat Box (type "chat_box"); messages land in env.chatLog
 function Env:addChatBox(name)
   local env = self

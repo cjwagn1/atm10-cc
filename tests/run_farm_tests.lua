@@ -171,6 +171,34 @@ local function seedRefPlot(env, ox, oy, oz, w, d)
   end
 end
 
+-- ------------------------------------ 0. harness: Geo Scanner mock (auto-find)
+-- AP Geo Scanner scan(radius): blocks in a cube around the turtle, coords
+-- RELATIVE to it. The turtle uses this to FIND the plot it was never told.
+
+T("geo scanner: scan(radius) returns blocks relative to the turtle", function()
+  local env = CC.new{ turtle = { pos = { x = 10, y = 64, z = 10 },
+    facing = "north", fuel = 100 } }
+  env:addGeoScanner("scanner")
+  env:setBlock(12, 64, 10,
+    { id = "farmingforblockheads:fertilized_farmland_healthy" }) -- +2 east
+  env:setBlock(10, 63, 9, { id = "minecraft:stone" })            -- -1 y, -1 z
+  env.files["prog.lua"] = [[
+    local s = peripheral.find("geoScanner")
+    local out = fs.open("out", "w")
+    local found = {}
+    for _, b in ipairs(s.scan(4)) do
+      found[b.name] = b.x .. "," .. b.y .. "," .. b.z
+    end
+    out.writeLine(tostring(found["farmingforblockheads:fertilized_farmland_healthy"]))
+    out.writeLine(tostring(found["minecraft:stone"]))
+    out.close()
+  ]]
+  current = env
+  local res = env:run("prog.lua", {}, { maxTime = 10, fromVirtualFs = true })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(env:file("out"), "2,0,0\n0,-1,-1\n", "relative block positions")
+end)
+
 -- ----------------------------------------- 1. harness: turtle item-use mock
 -- §Harness extensions (FARM-RESEARCH Q1): turtle.place dispatches an item's
 -- useOn; the hoe tills dirt->farmland WITHOUT being consumed (durability only),
@@ -425,6 +453,30 @@ T("me bridge: exportItem two-returns (0, ERR) for an item not in stock", functio
   current = env
   env:run("prog.lua", {}, { maxTime = 10, fromVirtualFs = true })
   eq(env:file("out"), "0 ITEM_NOT_FOUND\n", "two-return error convention")
+end)
+
+-- ------------------------------------ 2b. farm.lua: autonomous plot-find
+-- The operator never tells the turtle where the plot is: with a Geo Scanner it
+-- scans a radius, filters the plot signature, and reports the bounding box.
+
+T("find: locates a sulfur plot it was never told about (Geo Scanner)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 70, z = 0 },
+    facing = "north", fuel = 100 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 4, 64, 0, 3, 3) -- a 3x3 plot, NW corner 4 east + 6 below
+  -- NO farm.conf at all - pure discovery
+  current = env
+  local res = env:run(FARM, { "find" }, { maxTime = 30 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "found a 3x3 plot", "located the plot by scanning")
+end)
+
+T("find: reports nothing-found with no Geo Scanner and no plot", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 70, z = 0 },
+    facing = "north", fuel = 100 } }
+  current = env
+  env:run(FARM, { "find" }, { maxTime = 10 })
+  expectContains(env:termText(), "no sulfur plot", "clear not-found message")
 end)
 
 -- ------------------------------------------- 3. farm.lua: capture (Q3)

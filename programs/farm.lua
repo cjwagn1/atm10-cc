@@ -267,6 +267,57 @@ local function classify(name, state)
   return c
 end
 
+-- --------------------------------------------------------- autonomous find
+-- The operator never tells the turtle where the plot is. With a Geo Scanner it
+-- scans a radius, keeps the blocks that signal a sulfur plot (fertilized
+-- farmland, an MA crop, an AE2 accelerator), and takes their bounding box as
+-- the plot - all in coords RELATIVE to the turtle, so no GPS or coordinates are
+-- needed. (A search-by-flying fallback for a turtle with no scanner is a v1
+-- TODO; with a scanner the find is one call.)
+
+local function isPlotBlock(name)
+  if name == "farmingforblockheads:fertilized_farmland_healthy" then return true end
+  if name == "minecraft:farmland" then return true end
+  if name == "ae2:growth_accelerator" then return true end
+  if name:find("crop", 1, true)
+    and (name:find("agriculture", 1, true) or name:find("mystical", 1, true)) then
+    return true
+  end
+  return false
+end
+
+local function findScanner()
+  if not peripheral or not peripheral.find then return nil end
+  return peripheral.find("geoScanner")
+end
+
+-- Returns { rx, ry, rz (relative min corner), w, h, d, blocks } or nil + reason.
+local function findPlot(radius)
+  local scanner = findScanner()
+  if not scanner then return nil, "no Geo Scanner equipped" end
+  radius = radius or 16
+  local blocks
+  for _ = 1, 30 do -- the scanner may be charging / on cooldown: retry briefly
+    local b = scanner.scan(radius)
+    if type(b) == "table" then blocks = b; break end
+    sleep(1)
+  end
+  if not blocks then return nil, "scan failed" end
+  local minx, miny, minz, maxx, maxy, maxz, n
+  n = 0
+  for _, b in ipairs(blocks) do
+    if isPlotBlock(b.name) then
+      n = n + 1
+      minx = math.min(minx or b.x, b.x); maxx = math.max(maxx or b.x, b.x)
+      miny = math.min(miny or b.y, b.y); maxy = math.max(maxy or b.y, b.y)
+      minz = math.min(minz or b.z, b.z); maxz = math.max(maxz or b.z, b.z)
+    end
+  end
+  if n == 0 then return nil, "no plot in range" end
+  return { rx = minx, ry = miny, rz = minz,
+    w = maxx - minx + 1, h = maxy - miny + 1, d = maxz - minz + 1, blocks = n }
+end
+
 -- ----------------------------------------------------------- serialize
 
 -- Deterministic blueprint serializer (sorted keys) so a re-capture of the same
@@ -917,6 +968,22 @@ end
 
 local args = { ... }
 local cmd = args[1]
+
+-- `farm find`: a no-config dry run of the autonomous plot-find, so the operator
+-- can confirm the turtle sees their plot before committing to a build.
+if cmd == "find" then
+  local p, why = findPlot()
+  if p then
+    print(("farm: found a %dx%d plot (h=%d) from %d signature blocks.")
+      :format(p.w, p.d, p.h, p.blocks))
+    print(("  min corner is x%+d y%+d z%+d relative to me.")
+      :format(p.rx, p.ry, p.rz))
+  else
+    print("farm: no sulfur plot found nearby (" .. tostring(why) .. ").")
+    print("  Equip a Geo Scanner and/or set me down closer to the farm.")
+  end
+  return
+end
 
 local function confError()
   if not cfg then return "no farm.conf - write one first (see FARM-BUILD-DESIGN)." end
