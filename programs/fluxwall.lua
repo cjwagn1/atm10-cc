@@ -338,14 +338,27 @@ end
 
 -- --------------------------------------------------------------- state
 
+local DROP_AFTER  = 300   -- a source silent this long is DROPPED (wall returns to
+                          -- normal); STALE_AFTER..DROP_AFTER it shows NO SIGNAL
 local sources = {}  -- name -> { data, lastSeen, ring }
 local order = {}
 local alertMsg, alertAt
 local totalMsgs = 0
 
+-- Rebuild the render order each tick: drop a long-dead source entirely (so a
+-- removed turtle / dead sensor doesn't sit on the wall as NO SIGNAL forever), and
+-- skip any source the filter hides (defensive - keeps a hidden source off the
+-- base wall even if it was already in the table before an update).
 local function rebuildOrder()
   order = {}
-  for name in pairs(sources) do order[#order + 1] = name end
+  local now = os.clock()
+  for name, src in pairs(sources) do
+    if now - (src.lastSeen or now) > DROP_AFTER then
+      sources[name] = nil
+    elseif passesFilter(name) then
+      order[#order + 1] = name
+    end
+  end
   table.sort(order)
 end
 
@@ -421,6 +434,7 @@ local function renderTarget(t, isTerm)
 end
 
 local function render()
+  rebuildOrder()  -- drop long-dead sources + re-apply the filter each repaint
   pcall(renderTarget, term.current(), true)
   for i = #mons, 1, -1 do
     if not pcall(renderTarget, mons[i], false) then

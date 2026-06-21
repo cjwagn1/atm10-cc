@@ -1002,6 +1002,22 @@ T("wall: the BASE telemetry wall hides the farm builder source (farm*)", functio
   expectNotContains(m, "FARM", "farm telemetry is kept off the base wall")
 end)
 
+T("wall: a source silent past the drop window disappears (returns to normal)", function()
+  -- a removed turtle / dead sensor should not sit on the wall as NO SIGNAL
+  -- forever; after DROP_AFTER it is dropped and the wall returns to idle.
+  local env = CC.new{ termW = 51, termH = 19 }
+  env:addModem("top")
+  env:addMonitor("monitor_2", { baseW = 50, baseH = 24 })
+  local flux = { v = 1, source = "flux",
+    data = { trueE = 2952790016, trueCap = 281474976710656, rate = 0 } }
+  env:rednetAt(1.0, 7, flux, "telemetry") -- one packet, then silence
+  current = env
+  env:run(WALL, {}, { maxTime = 320 })    -- well past the 300s drop window
+  local m = env:monitorText("monitor_2")
+  expectNotContains(m, "FLUX", "the long-dead source was dropped from the wall")
+  expectContains(m, "waiting for telemetry", "wall returned to the idle state")
+end)
+
 T("wall: a dedicated wall can still opt in to a fleet source (sources=farm*)", function()
   local env = CC.new{ termW = 51, termH = 19 }
   env:addModem("top")
