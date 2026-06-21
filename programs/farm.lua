@@ -1641,6 +1641,24 @@ if cmd == "ae" then
   else
     print("  dirt: " .. tostring(d) .. " (NOT in the grid)")
   end
+  -- hoes: the build needs ANY hoe (stocked or AE-craftable). List what's there.
+  local dh = try("getItem", { name = "minecraft:diamond_hoe" })
+  print(("  diamond_hoe: %s"):format(type(dh) == "table"
+    and ("count=" .. tostring(dh.count) .. " craftable=" .. tostring(dh.isCraftable))
+    or "not in the grid"))
+  local hoes = {}
+  for _, e in ipairs(type(try("getItems")) == "table" and try("getItems") or {}) do
+    if type(e.name) == "string" and e.name:find("_hoe", 1, true) then
+      hoes[#hoes + 1] = e.name .. " x" .. tostring(e.count)
+    end
+  end
+  for _, e in ipairs(type(try("getCraftableItems")) == "table"
+    and try("getCraftableItems") or {}) do
+    if type(e.name) == "string" and e.name:find("_hoe", 1, true) then
+      hoes[#hoes + 1] = e.name .. " (craftable)"
+    end
+  end
+  print("  hoes I could use: " .. (#hoes > 0 and table.concat(hoes, ", ") or "NONE"))
   -- proof-of-pull: export 1 dirt to each side; did it actually reach me?
   local function invCount()
     local n = 0
