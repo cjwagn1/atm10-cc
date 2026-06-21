@@ -622,6 +622,15 @@ function Env:addMeBridge(name, o)
       local need = (type(filter) == "table" and filter.count) or 1
       craftJobSeq = craftJobSeq + 1
       local jobId = craftJobSeq
+      -- A pattern can EXIST (isCraftable=true) yet the job never finish: no free
+      -- ME Crafting CPU, or an ingredient isn't itself auto-craftable. Real AP
+      -- still hands back a job object (the request is queued) - the stock just
+      -- never rises and JOB_DONE never fires. craftStalls models that, so a
+      -- poll-until-stocked loop is forced to time out instead of getting a
+      -- free instant craft the way a cooperative AE always did in these tests.
+      if s.craftStalls then
+        return { getId = function() return jobId end, isDone = function() return false end }
+      end
       local at = env.ticks * TICK + (o.craftSeconds or 1)
       env:scheduleAt(at, { fn = function() s.count = (s.count or 0) + need end })
       env:scheduleAt(at, { ev = { "ae_crafting", false, jobId, "JOB_DONE" } })

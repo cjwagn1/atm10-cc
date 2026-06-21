@@ -820,6 +820,65 @@ T("setup wizard: calibrates the handoff when AE keeps no stock (crafts a probe)"
     3, 3, 3, 0), 8, "built by autocrafting everything from the ME")
 end)
 
+-- An AE PATTERN existing (isCraftable=true) does NOT mean the autocraft job can
+-- finish - that needs a free ME Crafting CPU + ingredients. The in-game halt was
+-- exactly this: diamond_hoe showed craftable, but the job stalled, so the build
+-- said "no-hoe". A STOCKED hoe is a sure pull, so prefer it over any craft - and
+-- ANY *_hoe tills, so a stocked stone hoe must beat crafting the exact diamond.
+T("supply: a stocked hoe is pulled instead of crafting a stalling diamond one", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "east", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 3, 74, 0, 3, 3)
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  -- a stocked stone hoe AND a craftable diamond hoe whose job would HANG forever
+  local stone = env:hoeItem{ id = "minecraft:stone_hoe", durability = 131 }
+  stone.count = 4
+  local diamond = env:hoeItem{ durability = 1561 }; diamond.count = 0
+  diamond.isCraftable = true; diamond.craftStalls = true
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  local water = env:waterBucketItem(); water.count = 16
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 0, craftSeconds = 1,
+    items = { dirt, stone, diamond, fert, seed, water, coal } })
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 200000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(diamond.count, 0, "never scheduled the stalling diamond-hoe craft")
+  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 3, 0), 8, "built using the stocked stone hoe")
+end)
+
+-- When the ONLY hoe is a craftable-but-stalling one (no free CPU) and none is
+-- stocked, the build can't till. It must halt with an ACTIONABLE message (drop a
+-- hoe in the slot / stock one) instead of a bare "no-hoe", and build nothing -
+-- not silently leave a half-tilled cell.
+T("supply: a stalling-only hoe halts with an actionable message, builds nothing", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "east", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 3, 74, 0, 3, 3)
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0
+  hoe.isCraftable = true; hoe.craftStalls = true
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  local water = env:waterBucketItem(); water.count = 16
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 0, craftSeconds = 1,
+    items = { dirt, hoe, fert, seed, water, coal } })
+  current = env
+  env:run(FARM, { "setup", "1" }, { maxTime = 300000 })
+  local t = env:termText()
+  expectContains(t, "no hoe", "halted on the hoe and said so")
+  expectContains(t, "slot 2", "told the operator which slot to drop a hoe in")
+  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 3, 0), 0, "built nothing without a hoe (no silent partial)")
+end)
+
 -- Heading calibration steps one block and reads the plot offset shift. At the
 -- scan-range edge the bbox MIN can "stick" on the boundary (the leaving block is
 -- replaced by its neighbour), so the old bbox-delta read 0 and failed. The
@@ -951,6 +1010,37 @@ T("ae: diagnostic reports the grid and proves a real pull", function()
   expectContains(t, "PULL OK", "proved a real pull from AE")
 end)
 
+-- The dirt PULL above only proves exporting STOCKED items. The build also needs
+-- to CRAFT (the hoe is count=0, craftable). `farm ae` must actually run that
+-- craft and report whether the AE can FINISH it - a stalled job (pattern exists,
+-- no free CPU) is the exact in-game "no-hoe" cause and must be named, not hidden.
+T("ae: the craft probe names a STALLED autocraft (pattern exists, nothing arrives)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100 } }
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0
+  hoe.isCraftable = true; hoe.craftStalls = true
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 5, items = { dirt, hoe } })
+  current = env
+  env:run(FARM, { "ae" }, { maxTime = 60 })
+  local t = env:termText()
+  expectContains(t, "craft probe", "ran a real craft probe, not just a stock pull")
+  expectContains(t, "STALLED", "named the stalled craft (the in-game no-hoe cause)")
+end)
+
+T("ae: the craft probe confirms OK when the AE can finish the craft", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100 } }
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0; hoe.isCraftable = true
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 5, craftSeconds = 1, items = { dirt, hoe } })
+  current = env
+  env:run(FARM, { "ae" }, { maxTime = 60 })
+  expectContains(env:termText(), "craft probe: OK", "confirmed a working autocraft")
+end)
+
 T("ae: an empty/disconnected bridge shows 0 item types and PULL FAILED", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "east", fuel = 100 } }
@@ -960,6 +1050,53 @@ T("ae: an empty/disconnected bridge shows 0 item types and PULL FAILED", functio
   local t = env:termText()
   expectContains(t, "grid item types: 0", "empty grid reported")
   expectContains(t, "PULL FAILED", "couldn't pull from an empty grid")
+end)
+
+-- The installer's startup.lua runs `farm` on EVERY boot, so the turtle takes off
+-- before the operator can read 'farm ae' / 'farm capture'. A hold flag parks it
+-- at the shell; 'farm go' resumes. This is the operator's testing escape hatch.
+T("hold: 'farm hold' parks the turtle so a bare 'farm' won't auto-build", function()
+  local env = buildRig()
+  current = env
+  env:run(FARM, { "hold" }, { maxTime = 10 })
+  eq(env:file("farm.hold") ~= nil, true, "hold flag written")
+  env:run(FARM, {}, { maxTime = 4000 }) -- bare 'farm' = the boot auto-start
+  expectContains(env:termText(), "HELD", "stayed held instead of building")
+  eq(countLayer(env, 100, "farmingforblockheads:fertilized_farmland_healthy"), 0,
+    "built nothing while held")
+end)
+
+T("hold: pressing a key during the boot window holds before the turtle moves", function()
+  local env = buildRig()
+  current = env
+  env:keyAt(1, 57) -- tap a key 1s into the 3s auto-build window
+  env:run(FARM, {}, { maxTime = 4000 })
+  eq(env:file("farm.hold") ~= nil, true, "the keypress wrote the hold flag")
+  expectContains(env:termText(), "HELD", "held on the keypress")
+  eq(countLayer(env, 100, "farmingforblockheads:fertilized_farmland_healthy"), 0,
+    "caught it before it built anything")
+end)
+
+T("hold: 'farm go' clears the hold and builds", function()
+  local env = buildRig()
+  current = env
+  env:run(FARM, { "hold" }, { maxTime = 10 })
+  local res = env:run(FARM, { "go" }, { maxTime = 4000 })
+  eq(res.reason, "done", "go ran the build (err=" .. tostring(res.err) .. ")")
+  eq(env:file("farm.hold"), nil, "go cleared the hold flag")
+  eq(countLayer(env, 100, "farmingforblockheads:fertilized_farmland_healthy"), 8,
+    "go built the plot")
+end)
+
+T("hold: a mid-build kill-resume skips the boot window (resumes unattended)", function()
+  local env = buildRig()
+  current = env
+  -- an in-progress journal = a chunk-reload resume: must NOT wait for a keypress
+  env.files["farm.journal"] = "phase=build\nplot=0\ndy=0\npos=0,120,0\nheading=east\n"
+  env:run(FARM, {}, { maxTime = 4000 })
+  expectNotContains(env:termText(), "press any key", "no hold window on a resume")
+  eq(countLayer(env, 100, "farmingforblockheads:fertilized_farmland_healthy"), 8,
+    "resumed and finished without waiting for a key")
 end)
 
 -- ------------------------------------------- 3. farm.lua: capture (Q3)

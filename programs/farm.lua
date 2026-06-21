@@ -13,7 +13,12 @@ Commands:
   farm capture     inspect-traversal of the reference plot -> farm.blueprint
   farm build       self-test, then build the stack (resumes if interrupted)
   farm selftest    run the startup self-tests only, build nothing
-  farm             resume from the journal (what startup.lua runs)
+  farm ae          diagnose the AE link (stock pull + a real craft probe)
+  farm hold        park at the shell; don't auto-build on boot (for inspecting)
+  farm go          clear the hold and build now
+  farm release     clear the hold, stay at the shell
+  farm             resume from the journal (what startup.lua runs); on a fresh
+                   boot, a 3s keypress window holds it before it moves
 
 Design + claim ledger: docs/FARM-BUILD-DESIGN.md, docs/FARM-RESEARCH.md
 (Q1..Q6). Every turtle/AE behavior relied on here is cited there. No build
@@ -870,24 +875,29 @@ local function restock(slot, spec, minCount, batch)
     navSafe(saved.x, saved.y, saved.z); faceTo(savedHeading); clearIntent()
     return false
   end
-  -- Resolve which item to actually pull. Normally spec.name; but spec.alt lets a
-  -- generic need accept any matching variant the AE can give (e.g. ANY *_hoe -
-  -- tilling works with any hoe, and the operator's exact diamond hoe may have no
-  -- encoded autocraft pattern). Prefer the exact item if obtainable, else the
-  -- first matching item that's stocked, else the first that's craftable.
+  -- Resolve which item to actually pull. Prefer a STOCKED item over an autocraft:
+  -- a craft needs a free ME Crafting CPU + ingredients and can STALL (isCraftable
+  -- only means a pattern EXISTS, not that the job will finish - this was the
+  -- in-game "no-hoe": diamond_hoe showed craftable but the job never delivered).
+  -- spec.alt lets a generic need accept any matching variant (ANY *_hoe tills),
+  -- so a stocked stone hoe beats crafting the exact diamond. Order: exact-if-
+  -- stocked -> alt-if-stocked -> exact-if-craftable -> alt-if-craftable.
   local target = spec.name
   if spec.alt then
-    local function canGet(nm)
+    local function stocked(nm)
       local it = bridge.getItem({ name = nm })
-      if it and (it.count or 0) > 0 then return true end
-      return bridge.isCraftable({ name = nm }) == true
+      return it and (it.count or 0) > 0
     end
-    if not canGet(target) then
+    if not stocked(target) then
+      local altStocked
       for _, e in ipairs(bridge.getItems() or {}) do
         if type(e.name) == "string" and e.name:find(spec.alt, 1, true)
-          and (e.count or 0) > 0 then target = e.name; break end
+          and (e.count or 0) > 0 then altStocked = e.name; break end
       end
-      if not canGet(target) and bridge.getCraftableItems then
+      if altStocked then
+        target = altStocked
+      elseif bridge.isCraftable({ name = target }) ~= true
+        and bridge.getCraftableItems then
         for _, e in ipairs(bridge.getCraftableItems() or {}) do
           if type(e.name) == "string" and e.name:find(spec.alt, 1, true) then
             target = e.name; break
@@ -924,10 +934,24 @@ local function restock(slot, spec, minCount, batch)
     -- craft only if observed AE stock can't cover the request and a pattern
     -- exists; never re-issue on a job id (idempotent on observed stock)
     if count < minCount and bridge.isCraftable({ name = target }) then
-      bridge.craftItem({ name = target, count = batch })
-      local deadline = os.clock() + cfg.craft_timeout
-      while select(1, resolveStock()) < minCount and os.clock() < deadline do
-        os.sleep(0.5)
+      local job, cerr = bridge.craftItem({ name = target, count = batch })
+      if not job then
+        -- AP returns nil + reason if the craft can't even be scheduled
+        print(("farm: AE refused to craft %s (%s)."):format(target, tostring(cerr)))
+      else
+        local deadline = os.clock() + cfg.craft_timeout
+        while select(1, resolveStock()) < minCount and os.clock() < deadline do
+          os.sleep(0.5)
+        end
+        if select(1, resolveStock()) < minCount then
+          -- the pattern exists but no item arrived: a STALLED job (no free ME
+          -- Crafting CPU, or an ingredient isn't itself auto-craftable). Name it
+          -- - a bare "no-X" sent the operator hunting blind every round.
+          print(("farm: asked AE to craft %s but none arrived in %ds - the pattern "
+            .. "exists but the job didn't finish (free ME Crafting CPU + "
+            .. "ingredients?). Stock one instead, or hand me one.")
+            :format(target, cfg.craft_timeout))
+        end
       end
       count, filter = resolveStock()
     end
@@ -993,17 +1017,28 @@ local function ensureHoe()
   turtle.select(cfg.slots.hoe)
   local d = turtle.getItemDetail(cfg.slots.hoe, true)
   local hoeSpec = { name = cfg.items.hoe, alt = "_hoe" }
+  -- restock() prefers a STOCKED *_hoe over an autocraft (a craft can stall). If
+  -- even that fails, say EXACTLY what to do - a hoe in the slot is the surest fix
+  -- and the build is journaled, so re-running 'farm' resumes from here.
+  local function pull()
+    local ok = restock(cfg.slots.hoe, hoeSpec, 1, 1)
+    if not ok then
+      print(("farm: no hoe available. Drop ANY *_hoe in my slot %d and run "
+        .. "'farm' to resume, or stock/auto-craft one in AE."):format(cfg.slots.hoe))
+    end
+    return ok
+  end
   if d and isHoe(d.name) then
     -- restock before the hoe breaks mid-plot (Q1: ~one till-op per soil cell).
     -- A worn hoe still occupies the slot, so evacuate it first so a fresh one
     -- can be pulled in.
     if d.maxDamage and (d.maxDamage - (d.damage or 0)) <= 1 then
       turtle.select(cfg.slots.hoe); turtle.dropUp() -- discard the worn hoe
-      return restock(cfg.slots.hoe, hoeSpec, 1, 1)
+      return pull()
     end
     return true
   end
-  return restock(cfg.slots.hoe, hoeSpec, 1, 1)
+  return pull()
 end
 
 -- ----------------------------------------------------------- build cells
@@ -1756,6 +1791,50 @@ if cmd == "reset" then
   return
 end
 
+-- Hold / inspect mode. The installer's startup.lua runs `farm` on EVERY boot, so
+-- the turtle takes off before the operator can read `farm ae` / `farm capture`.
+-- `farm hold` parks it at the shell; `farm go` builds; `farm release` clears the
+-- hold. On a bare boot the turtle also offers a brief window to grab it with a
+-- keypress - but only on a FRESH start, so a chunk-reload kill-resume (journal on
+-- disk) keeps building unattended.
+local HOLD_PATH = "farm.hold"
+if cmd == "hold" then
+  writeFile(HOLD_PATH, "held\n")
+  print("farm: HELD - I won't auto-build on boot.")
+  print("  inspect freely: 'farm ae', 'farm capture', 'farm find'.")
+  print("  then 'farm go' to build, or 'farm release' to just clear the hold.")
+  return
+end
+if cmd == "release" then
+  if fs.exists(HOLD_PATH) then fs.delete(HOLD_PATH) end
+  print("farm: hold cleared. Run 'farm' (or reboot) to build.")
+  return
+end
+local explicitGo = (cmd == "go")
+if explicitGo then
+  if fs.exists(HOLD_PATH) then fs.delete(HOLD_PATH) end
+  cmd = nil -- fall through to the normal auto-start (wizard / build) path
+end
+if cmd == nil and not explicitGo then
+  if fs.exists(HOLD_PATH) then
+    print("farm: HELD - not auto-building. 'farm go' to build, 'farm release' to clear.")
+    return
+  end
+  if not fs.exists(JOURNAL_PATH) then
+    print("farm: auto-building in 3s - press any key to HOLD (inspect first).")
+    local timer = os.startTimer(3)
+    while true do
+      local ev, a = os.pullEvent()
+      if ev == "timer" and a == timer then break end
+      if ev == "key" or ev == "char" then
+        writeFile(HOLD_PATH, "held\n")
+        print("farm: HELD. Inspect freely; 'farm go' to build, 'farm release' to clear.")
+        return
+      end
+    end
+  end
+end
+
 -- `farm find`: a no-config dry run of the autonomous plot-find, so the operator
 -- can confirm the turtle sees their plot before committing to a build.
 -- `farm ae`: prove the AE link. Reports the bridge connection/energy, how many
@@ -1837,6 +1916,44 @@ if cmd == "ae" then
     print("  PULL FAILED: couldn't get dirt out of the bridge.")
     print("  grid item types 0 => the bridge isn't on your AE network")
     print("  (needs power + a channel + the cross-dim link). Fix that first.")
+  end
+  -- Craft probe: the dirt pull only proves exporting STOCKED items. A PATTERN
+  -- existing (isCraftable=true) does NOT mean the job will FINISH - that needs a
+  -- free ME Crafting CPU + ingredients. Actually run the hoe craft the build
+  -- depends on, so a stalled autocraft (the in-game "no-hoe") is visible HERE in
+  -- one shot, instead of only when the build halts.
+  local hoeName = (cfg and cfg.items and cfg.items.hoe) or "minecraft:diamond_hoe"
+  local hoeSlot = (cfg and cfg.slots and cfg.slots.hoe) or 2
+  local h0 = type(b.getItem) == "function" and b.getItem({ name = hoeName }) or nil
+  if type(h0) == "table" and (h0.count or 0) > 0 then
+    print(("  craft probe: skipped - %s already stocked (count %s)."):format(
+      hoeName, tostring(h0.count)))
+  elseif type(h0) == "table" and h0.isCraftable then
+    print("  craft probe: crafting " .. hoeName .. " (the build needs a hoe)...")
+    local ok, job, cerr = pcall(b.craftItem, { name = hoeName, count = 1 })
+    if not ok then
+      print("  craft probe: craftItem ERRORED (" .. tostring(job) .. ").")
+    elseif not job then
+      print("  craft probe: AE refused the craft (" .. tostring(cerr) .. ").")
+    else
+      local deadline = os.clock() + 15
+      while os.clock() < deadline do
+        local it = b.getItem({ name = hoeName })
+        if it and (it.count or 0) > 0 then break end
+        os.sleep(0.5)
+      end
+      local it = b.getItem({ name = hoeName })
+      if it and (it.count or 0) > 0 then
+        print(("  craft probe: OK - AE crafted %s (count %s)."):format(
+          hoeName, tostring(it.count)))
+      else
+        print("  craft probe: STALLED - pattern exists but nothing crafted in 15s.")
+        print("  => no free ME Crafting CPU or a missing ingredient.")
+        print(("     Stock a hoe, or drop one in my slot %d instead."):format(hoeSlot))
+      end
+    end
+  else
+    print(("  craft probe: %s is neither stocked nor craftable here."):format(hoeName))
   end
   return
 end
@@ -1936,6 +2053,7 @@ elseif cmd == "selftest" then
   return
 else
   print("farm: unknown command '" .. tostring(cmd) .. "'")
-  print("usage: farm [capture|build|selftest]")
+  print("usage: farm [setup|build|capture|selftest|ae|find|reset]")
+  print("       farm hold | go | release   (park before it auto-builds)")
   return
 end
