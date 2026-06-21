@@ -879,6 +879,37 @@ T("supply: a stalling-only hoe halts with an actionable message, builds nothing"
     3, 3, 3, 0), 0, "built nothing without a hoe (no silent partial)")
 end)
 
+-- THE in-game bug: the wizard scans the plot from above, then homes to its dock
+-- for the build. Homing straight DOWN (navTo) walks into the plot it just
+-- captured, jams, and the build then dead-reckons from a frame OFFSET by however
+-- far it's stuck - so every restock "goes back to the bridge" lands at the wrong
+-- real cell and dies no-hoe. Here the bridge is a fixed BLOCK north of the dock
+-- (readable ONLY when the turtle is physically docked facing it), so the offset
+-- genuinely hides it - exactly like in-game. navSafe homing (over the top) fixes it.
+T("setup wizard: homes back over the plot so restock can still reach the bridge", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "north", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 3, 63, 0, 3, 3) -- one BELOW the dock + aside: the home descent crosses it
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  local water = env:waterBucketItem(); water.count = 16
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  -- the bridge is a fixed BLOCK just NORTH of the dock: readable ONLY when the
+  -- turtle is physically at the dock facing north. A frame offset hides it.
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
+    blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6, usage = 0,
+    craftSeconds = 1, items = { dirt, hoe, fert, seed, water, coal } })
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 250000 })
+  expectNotContains(env:termText(), "isn't in reach", "got back to the dock + reached the bridge")
+  expectNotContains(env:termText(), "no-hoe", "restocked the hoe (frame not offset)")
+  eq(countLayer(env, 65, "farmingforblockheads:fertilized_farmland_healthy", 3, 3, 3, 0),
+    8, "built the copy above the existing plot (frame stayed true)")
+end)
+
 -- Heading calibration steps one block and reads the plot offset shift. At the
 -- scan-range edge the bbox MIN can "stick" on the boundary (the leaving block is
 -- replaced by its neighbour), so the old bbox-delta read 0 and failed. The

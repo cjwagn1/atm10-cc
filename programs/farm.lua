@@ -921,10 +921,16 @@ local function restock(slot, spec, minCount, batch)
   if cfg.base.bridge_facing then
     faceTo(cfg.base.bridge_facing)
     bridge = findBridge()
+    if not bridge then bridge = faceBridge() end -- calibrated facing stale? turn to find it
   else
     bridge = faceBridge()
   end
   if not bridge then
+    -- Parked but no ME Bridge in reach. With the home/park fixed this means I
+    -- genuinely can't touch it (drifted off the dock, or it moved) - say so loudly
+    -- instead of bubbling up a cryptic "no-<item>", which sent us chasing the AE.
+    print("farm: I went back to my dock to restock but the ME Bridge isn't in reach")
+    print("  - I may have drifted off the dock, or it moved. I won't fake it.")
     navSafe(saved.x, saved.y, saved.z); faceTo(savedHeading); clearIntent()
     return false
   end
@@ -1826,7 +1832,19 @@ local function runWizard(plotCount)
     return false
   end
   if not capture() then return false end
-  navTo(cfg.start.x, cfg.start.y, cfg.start.z) -- home to the dock for the build
+  -- Home to the dock for the build via navSafe (rise to the clear travel ceiling,
+  -- move across, descend onto the dock column) - NOT navTo, whose vertical-first
+  -- descent walks straight DOWN into the plot I just captured, jams, and leaves me
+  -- stranded over the plot. boot() then assumes I'm at the dock (0,0,0) and the
+  -- whole build dead-reckons from a frame that's OFFSET by however far I'm stuck -
+  -- so every restock "returns to the bridge" at the wrong real cell and dies
+  -- no-hoe. If even navSafe can't get home, ABORT (don't build from a bad frame).
+  if not navSafe(cfg.start.x, cfg.start.y, cfg.start.z) then
+    print("farm: scanned the plot but couldn't get back to my dock (path blocked).")
+    print("  I won't build from a guessed position. Clear the route / set me beside")
+    print("  the bridge, then re-run 'farm'.")
+    return false
+  end
   -- Leave me physically facing the heading boot() will assume. There is no
   -- journal yet (the wizard does not journal), so the fresh build dead-reckons
   -- from cfg.heading; capture's last move can leave me facing any direction, so

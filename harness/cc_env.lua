@@ -709,6 +709,12 @@ function Env:addMeBridge(name, o)
   -- adjacent block, not a wired-network peripheral): findBridge sees it only at
   -- that facing, so the builder must turn toward it before pulling.
   self.periph[name].whenFacing = o.whenFacing
+  -- o.blockAt models the bridge as a fixed BLOCK at a world cell: the turtle can
+  -- read it ONLY when the cell it faces IS that block (physical adjacency). A
+  -- dead-reckoning frame offset that walks the turtle to the wrong real cell then
+  -- hides the bridge - exactly as in-game, where reading it needs the turtle to
+  -- actually be docked next to it (facing-only gating let the offset stay hidden).
+  self.periph[name].blockAt = o.blockAt
   return self.periph[name]
 end
 
@@ -1773,6 +1779,16 @@ local function buildPeripheralApi(env)
     if not (e and e.attached) then return false end
     if e.whenFacing and (not env.turtle or env.turtle.facing ~= e.whenFacing) then
       return false
+    end
+    -- blockAt: readable only when the turtle physically faces that exact cell
+    if e.blockAt then
+      local t = env.turtle
+      local f = t and FACES[t.facing]
+      if not f then return false end
+      if t.pos.x + f.x ~= e.blockAt.x or t.pos.y ~= e.blockAt.y
+        or t.pos.z + f.z ~= e.blockAt.z then
+        return false
+      end
     end
     return true
   end
