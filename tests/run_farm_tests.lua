@@ -756,6 +756,48 @@ T("setup wizard: reads heading even when a step pushes the plot to the range edg
     3, 3, -8, 0), 8, "copy built at the correct (un-rotated) location")
 end)
 
+-- AP's ME Bridge type string has varied (me_bridge / meBridge /
+-- advancedperipherals:me_bridge); an exact hasType("me_bridge") silently missed
+-- it - the same camelCase trap as the geo scanner. Match "bridge" as a substring
+-- across all of a peripheral's types (the proven mesensor approach).
+T("setup wizard: detects an ME Bridge whose type is camelCase 'meBridge'", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "east", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 3, 74, 0, 3, 3)
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  local water = env:waterBucketItem(); water.count = 16
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  env:addMeBridge("me", { type = "meBridge", intoTurtle = "north",
+    stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    items = { dirt, hoe, fert, seed, water, coal } })
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "ME Bridge found", "found the camelCase-typed bridge")
+  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 3, 0), 8, "built after detecting the bridge")
+end)
+
+-- A missing bridge must fail BEFORE the turtle wanders off to calibrate its
+-- heading (the operator saw it step forward, then fail on the bridge, then step
+-- back - confusing). Check the bridge first, move nothing.
+T("setup wizard: a missing ME Bridge fails without the turtle moving", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "east", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 3, 74, 0, 3, 3)
+  -- NO ME bridge at all
+  current = env
+  env:run(FARM, { "setup", "1" }, { maxTime = 30000 })
+  expectContains(env:termText(), "no ME Bridge", "reported the missing bridge")
+  eq(env.turtle.pos.x, 0, "did not move x"); eq(env.turtle.pos.z, 0, "did not move z")
+  eq(env.turtle.pos.y, 80, "did not move y")
+end)
+
 T("reset: wipes config, blueprint, and journal back to first-run state", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "east", fuel = 100 } }
@@ -914,6 +956,45 @@ T("build: stacks 2 plots, plot N+1 base = plot N base + height", function()
   eq(countLayer(env, 102, "farmingforblockheads:fertilized_farmland_healthy"),
     9, "plot1 soil at base+height")
   eq(countLayer(env, 103, "mysticalagriculture:sulfur_crop"), 9, "plot1 crops")
+end)
+
+-- A captured farm includes infrastructure blocks the turtle can't reproduce: an
+-- NBT-keyed ender chest (the external harvest output), keyed cables, etc. The AE
+-- has no pattern for those, so the build must SKIP them (warn) and finish the
+-- sulfur-growing part, not halt the whole stack.
+local BP_WITH_INFRA = [[return {
+  size = { w = 2, h = 1, d = 1 },
+  cells = {
+    ["0,0,0"] = { kind = "soil", tier = "plain" },
+    ["1,0,0"] = { kind = "block", id = "enderstorage:ender_chest" },
+  },
+}
+]]
+
+T("build: an un-obtainable infrastructure block is skipped, not a fatal halt", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 80000 } }
+  env.files["farm.blueprint"] = BP_WITH_INFRA
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 2, h = 1, d = 1 },
+    heading = "east", scan_y = 66,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
+      staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
+  }]]
+  local dirt = { id = "minecraft:dirt", count = 256 } -- AE has dirt, NOT the chest
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0,
+    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt } })
+  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 8000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "halted", "did not halt on the un-obtainable block")
+  expectContains(env:termText(), "skipping enderstorage:ender_chest", "warned about the skip")
+  eq(env:block(0, 100, 0) and env:block(0, 100, 0).id, "minecraft:farmland",
+    "the soil (sulfur-growing part) still got built")
+  eq(env:file("farm.journal"), nil, "build completed despite the skip")
 end)
 
 -- ----------------------------------------- 5. farm.lua: supply / restock (Q2)

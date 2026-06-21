@@ -627,13 +627,28 @@ end
 local bridge          -- wrapped ME Bridge peripheral, or nil
 local broadcast       -- forward decl (telemetry; defined in orchestration)
 
+-- The AP ME Bridge peripheral type has varied across builds (me_bridge /
+-- meBridge / advancedperipherals:me_bridge), so an exact hasType("me_bridge")
+-- match silently missed an attached bridge - the same camelCase trap the geo
+-- scanner hit. Use the proven mesensor approach: match "bridge" as a substring
+-- across ALL of a peripheral's types; then fall back to the ME-Bridge method
+-- shape so a fully renamed type still can't hide it.
 local function findBridge()
   if cfg and cfg.base and cfg.base.bridge and peripheral.isPresent(cfg.base.bridge) then
-    return peripheral.wrap(cfg.base.bridge)
+    return peripheral.wrap(cfg.base.bridge), cfg.base.bridge
   end
   for _, n in ipairs(peripheral.getNames()) do
-    if peripheral.hasType and peripheral.hasType(n, "me_bridge") then
-      return peripheral.wrap(n), n
+    for _, ty in ipairs({ peripheral.getType(n) }) do
+      if type(ty) == "string" and ty:lower():find("bridge", 1, true) then
+        return peripheral.wrap(n), n
+      end
+    end
+  end
+  for _, n in ipairs(peripheral.getNames()) do
+    local ok, m = pcall(peripheral.wrap, n)
+    if ok and type(m) == "table" and type(m.getItem) == "function"
+      and type(m.exportItem) == "function" then
+      return m, n
     end
   end
   return nil
@@ -881,8 +896,19 @@ local function doBlock(id)
   local cur = nameBelow()
   if cur == id then return true end           -- already placed (converge skip)
   if cur then return true end
+  -- ensureItem already auto-crafts anything the ME has a pattern for. If it
+  -- still can't get this block, it's infrastructure the turtle can't reproduce -
+  -- an NBT-keyed ender chest (your external harvest output), a frequency-keyed
+  -- cable, a harvester pylon. SKIP it (loudly) instead of killing the whole
+  -- build: the soil + crops + water (what actually grows sulfur) still get laid,
+  -- and you place/wire the harvest blocks yourself (per the Phase-1 design,
+  -- harvest is external). A converge re-run re-checks, so adding a pattern later
+  -- + re-running fills it in.
   if not ensureItem(cfg.slots.block, { name = id }, 1) then
-    return false, "no-block:" .. id
+    print("farm: skipping " .. id .. " (not in AE / no craft pattern) - "
+      .. "place it yourself.")
+    broadcast{ state = "BUILD", skipped = id }
+    return true
   end
   intent("block"); turtle.placeDown(); clearIntent()
   return true
@@ -1283,6 +1309,15 @@ end
 local function runWizard(plotCount)
   print("farm: first run - setting myself up.")
   refuelFromInventory(2000) -- burn any starting coal so I can move to look around
+  -- Check the ME Bridge FIRST, before any wandering: a missing bridge should
+  -- fail instantly, not after I step around calibrating my heading (which looked
+  -- like the turtle "moving to find the bridge").
+  local bridge0, bridgeName = findBridge()
+  if not bridge0 then
+    print("farm: no ME Bridge found - mount one touching me (or wire it), reboot.")
+    return false
+  end
+  print("farm: ME Bridge found (" .. tostring(bridgeName) .. ").")
   local p, heading
   if findScanner() then
     print("farm: looking for your sulfur plot...")
@@ -1312,12 +1347,6 @@ local function runWizard(plotCount)
   end
   print(("farm: found a %dx%d plot (h=%d)."):format(p.w, p.d, p.h))
   print("farm: I'm facing " .. heading .. ".")
-  local bridge0, bridgeName = findBridge()
-  if not bridge0 then
-    print("farm: no ME Bridge found - place one touching/wired to me, reboot.")
-    return false
-  end
-  print("farm: ME Bridge found (" .. tostring(bridgeName) .. ").")
   -- probe how the bridge actually hands me items (which export side feeds a
   -- chest I can suck from), so the bridge can go anywhere adjacent to the chest
   local sup, serr = calibrateSupply(bridge0)

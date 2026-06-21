@@ -562,7 +562,10 @@ function Env:addMeBridge(name, o)
   end
   local craftJobSeq = 0
 
-  return self:addPeripheral(name, { "me_bridge" }, {
+  -- o.type overrides the registered peripheral type so a test can reproduce the
+  -- real-world variance (me_bridge / meBridge / advancedperipherals:me_bridge)
+  -- that an exact hasType() match silently missed.
+  return self:addPeripheral(name, { o.type or "me_bridge" }, {
     getStoredEnergy = function() return o.stored end,
     getEnergyCapacity = function() return o.max end,
     getEnergyUsage = function() return o.usage end,

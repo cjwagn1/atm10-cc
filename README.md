@@ -63,8 +63,8 @@ Two things make this repo unusual:
 1. **Every program is tested before it ever touches the server** — in a
    purpose-built headless CC:Tweaked emulator (`harness/`), against mock
    peripherals whose APIs were verified by reading the actual mod sources
-   (vendored under `vendor/`). **202 tests** across three suites
-   (97 telemetry + 60 Project Sled + 45 Sulfur-Farm Builder), written
+   (vendored under `vendor/`). **205 tests** across three suites
+   (97 telemetry + 60 Project Sled + 48 Sulfur-Farm Builder), written
    TDD-style (red → green) — including kill-sweeps that reboot the turtles at
    every half-second of their work cycle and demand convergence.
 2. **It reads the true network energy past the 32-bit API ceiling** — a
@@ -333,7 +333,7 @@ The reason everything worked first-try in-game. `harness/cc_env.lua`
 ```bash
 toolchain/lua-5.2.4/src/lua tests/run_tests.lua       # 97 tests (telemetry + base control)
 toolchain/lua-5.2.4/src/lua tests/run_sled_tests.lua  # 60 tests (Project Sled)
-toolchain/lua-5.2.4/src/lua tests/run_farm_tests.lua  # 45 tests (Sulfur-Farm Builder)
+toolchain/lua-5.2.4/src/lua tests/run_farm_tests.lua  # 48 tests (Sulfur-Farm Builder)
 toolchain/lua-5.2.4/src/lua harness/demo.lua          # eyeball rendered screens
 ```
 
@@ -361,7 +361,7 @@ toolchain/lua-5.2.4/src/lua harness/demo.lua          # eyeball rendered screens
 programs/    the CC programs (deployable)
 deploy/      manifest.lua (files + roles + version; the release unit)
 harness/     cc_env.lua emulator + demo.lua scenario renderer
-tests/       run_tests.lua (97) + run_sled_tests.lua (60) + run_farm_tests.lua (45)
+tests/       run_tests.lua (97) + run_sled_tests.lua (60) + run_farm_tests.lua (48)
 vendor/      shallow clones: CC-Tweaked, AdvancedPeripherals, AppFlux,
              ExtendedAE (API ground truth; gitignored)
 toolchain/   Lua 5.2.4 built from source (gitignored)
