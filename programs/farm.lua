@@ -713,6 +713,22 @@ local function findBridge()
   return nil
 end
 
+-- A turtle can only reach an adjacent ME Bridge BLOCK when it's facing it - the
+-- bridge's readable side rotates with the turtle, so after I move/turn it may
+-- not be reachable at all (the in-game "can't detect the bridge unless it's on
+-- front" + "farm ae works, farm doesn't" symptom). Turn in place until findBridge
+-- sees it; report the right-turns taken so the caller UNDOES them only AFTER it
+-- has finished talking to the bridge (the handle is valid only while I face it).
+-- Must be called while parked ADJACENT to the bridge.
+local function faceBridge()
+  for turns = 0, 3 do
+    local b, n = findBridge()
+    if b then return b, n, turns end
+    turtle.turnRight()
+  end
+  return nil, nil, 0 -- full circle, no net rotation
+end
+
 -- Pull whatever the bridge dropped at the staging cell into `slot`. Run BEFORE
 -- any export (recoverDrop, sled.lua:386): if a kill struck between a prior
 -- export and the suck, the stack is on the ground - collect it rather than
@@ -764,14 +780,23 @@ local function restock(slot, spec, minCount, batch)
   if not navSafe(cfg.base.park.x, cfg.base.park.y, cfg.base.park.z) then
     return false
   end
-  -- Re-acquire the bridge AFTER parking. A turtle reaches an adjacent peripheral
-  -- by its SIDE name, which rotates with the turtle - a handle wrapped before I
-  -- moved/turned points at the wrong side and silently reads an empty grid (the
-  -- "AE has nothing" bug). findBridge re-scans every side, so this is correct
-  -- regardless of which way I ended up facing.
-  bridge = findBridge() or bridge
+  -- FACE the bridge before reading it. A turtle reaches an adjacent peripheral
+  -- only on a side it faces; navigation left me facing some other way, so a handle
+  -- wrapped elsewhere silently reads an empty grid (the "AE has nothing" bug).
+  -- Prefer the calibrated facing (faceTo journals it -> kill-safe); else turn
+  -- until I find it. Re-wrap fresh once facing it.
+  local undoTurns = 0
+  if cfg.base.bridge_facing then
+    faceTo(cfg.base.bridge_facing)
+    bridge = findBridge()
+  else
+    bridge, _, undoTurns = faceBridge()
+  end
+  local function unface()
+    for _ = 1, undoTurns do turtle.turnLeft() end
+  end
   if not bridge then
-    navSafe(saved.x, saved.y, saved.z); faceTo(savedHeading); clearIntent()
+    unface(); navSafe(saved.x, saved.y, saved.z); faceTo(savedHeading); clearIntent()
     return false
   end
   turtle.select(slot)
@@ -817,6 +842,7 @@ local function restock(slot, spec, minCount, batch)
     end
   end
   local got = slotCount()
+  unface() -- undo any raw faceBridge turns before navigating away
   navSafe(saved.x, saved.y, saved.z)
   faceTo(savedHeading)
   clearIntent()
@@ -1331,6 +1357,9 @@ local function serializeConf(c)
   if c.base.bridge then o[#o + 1] = ("    bridge = %q,"):format(c.base.bridge) end
   o[#o + 1] = ("    park = %s, suck = %q, export_side = %q,")
     :format(ptStr(c.base.park), c.base.suck, c.base.export_side or c.base.suck)
+  if c.base.bridge_facing then
+    o[#o + 1] = ("    bridge_facing = %q,"):format(c.base.bridge_facing)
+  end
   o[#o + 1] = "  },"
   o[#o + 1] = ("  fleet = %q,"):format(c.fleet or "farm1")
   o[#o + 1] = "}"
@@ -1352,12 +1381,10 @@ local CAL_SUCK_DIRS = { "down", "up" }
 local CAL_SLOT = 15  -- the scratch slot (conf.slots.scratch default)
 
 local function calibrateSupply(bridge0)
-  -- Re-acquire the bridge: calibrating my heading turned/moved me, so the
-  -- bridge's peripheral side (and any handle wrapped before) changed. Without
-  -- this, getItem reads the wrong side and reports an empty grid even though the
-  -- AE is full (the "farm ae works but farm doesn't" bug).
-  bridge0 = findBridge() or bridge0
-  if not bridge0 then return nil, "lost the ME Bridge after calibrating heading" end
+  -- The caller (wizard) has already turned me to FACE the bridge - a turtle can
+  -- only read an adjacent peripheral on a side it faces, so this whole probe runs
+  -- while facing it; the wizard turns me back afterward.
+  if not bridge0 then return nil, "no ME Bridge to calibrate against" end
   -- A probe to push through the handoff so we can see which side feeds the
   -- turtle. Prefer something already in stock (dirt, else anything); if the AE
   -- keeps NO raw stock (everything autocrafted on demand), craft one dirt - the
@@ -1457,9 +1484,20 @@ local function runWizard(plotCount)
   end
   print(("farm: found a %dx%d plot (h=%d)."):format(p.w, p.d, p.h))
   print("farm: I'm facing " .. heading .. ".")
-  -- probe how the bridge actually hands me items (which export side feeds a
-  -- chest I can suck from), so the bridge can go anywhere adjacent to the chest
-  local sup, serr = calibrateSupply(bridge0)
+  -- I can only read the bridge while FACING it (a turtle reaches an adjacent
+  -- peripheral only on a side it faces). Turn to face it, probe the handoff while
+  -- facing it, record that facing (so restock re-faces it, kill-safe), turn back.
+  local fb, _, fbTurns = faceBridge()
+  local bridgeFacing = heading
+  for _ = 1, fbTurns do bridgeFacing = RIGHTD[bridgeFacing] end
+  local sup, serr
+  if fb then
+    print("farm: I read the ME Bridge when I face " .. bridgeFacing .. ".")
+    sup, serr = calibrateSupply(fb)
+  else
+    serr = "couldn't get the bridge onto a side I can read"
+  end
+  for _ = 1, fbTurns do turtle.turnLeft() end -- back to my plot heading
   if sup then
     if sup.suck == "self" then
       print(("farm: supply calibrated - bridge on my %s feeds me directly.")
@@ -1494,7 +1532,7 @@ local function runWizard(plotCount)
     build = { x = bx, y = p.ry + p.h, z = bz }, plots = plotCount,
     travel_y = p.ry + p.h + plotCount * p.h + 4,
     base = { bridge = bridgeName, park = { x = 0, y = 0, z = 0 },
-      suck = sup.suck, export_side = sup.export_side },
+      suck = sup.suck, export_side = sup.export_side, bridge_facing = bridgeFacing },
     fleet = "farm1",
   }
   writeFile(CONF_PATH, serializeConf(gen))

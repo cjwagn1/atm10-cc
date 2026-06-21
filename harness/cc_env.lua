@@ -571,7 +571,7 @@ function Env:addMeBridge(name, o)
   -- o.type overrides the registered peripheral type so a test can reproduce the
   -- real-world variance (me_bridge / meBridge / advancedperipherals:me_bridge)
   -- that an exact hasType() match silently missed.
-  return self:addPeripheral(name, { o.type or "me_bridge" }, {
+  self:addPeripheral(name, { o.type or "me_bridge" }, {
     getStoredEnergy = function() return o.stored end,
     getEnergyCapacity = function() return o.max end,
     getEnergyUsage = function() return o.usage end,
@@ -686,6 +686,11 @@ function Env:addMeBridge(name, o)
       return (o.totalChemicalStorage or 0) - (o.usedChemicalStorage or 0)
     end,
   })
+  -- o.whenFacing models a bridge a turtle can only read while facing it (an
+  -- adjacent block, not a wired-network peripheral): findBridge sees it only at
+  -- that facing, so the builder must turn toward it before pulling.
+  self.periph[name].whenFacing = o.whenFacing
+  return self.periph[name]
 end
 
 -- AP Geo Scanner (type "geoScanner"): scan(radius) returns every block in a
@@ -1722,16 +1727,28 @@ local function buildPeripheralApi(env)
     return nil
   end
 
+  -- A peripheral with whenFacing set models an adjacent BLOCK a turtle can only
+  -- reach when facing it: it appears in getNames / is wrappable ONLY while
+  -- env.turtle.facing matches. This reproduces the real "the turtle can only
+  -- read the ME Bridge when it faces it" constraint that fixed-name peripherals
+  -- never modeled.
+  local function visible(e)
+    if not (e and e.attached) then return false end
+    if e.whenFacing and (not env.turtle or env.turtle.facing ~= e.whenFacing) then
+      return false
+    end
+    return true
+  end
   local function entryFor(name)
     local e = env.periph[name]
-    if e and e.attached then return e end
+    if visible(e) then return e end
     return sideEntry(name)
   end
 
   function P.getNames()
     local out = {}
     for _, name in ipairs(env.periphOrder) do
-      if env.periph[name].attached then out[#out + 1] = name end
+      if visible(env.periph[name]) then out[#out + 1] = name end
     end
     if env.sideAttach then
       for _, side in ipairs(SIDE_NAMES) do

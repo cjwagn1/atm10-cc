@@ -1209,6 +1209,36 @@ T("supply: stacks TWO water-bearing plots (emptied bucket is evacuated)", functi
   if not env:block(1, 101, 1) then fail("plot1 water has no sub-floor") end
 end)
 
+-- THE in-game bug: a turtle reaches the ME Bridge only while FACING it (an
+-- adjacent block, not a network peripheral), and navigation leaves it facing
+-- elsewhere -> it reads an empty grid and reports "AE has nothing", even though
+-- `farm ae` (which never turns) pulls fine. The build must turn to face the
+-- bridge (cfg.base.bridge_facing) before every pull. whenFacing models the
+-- constraint the harness never did.
+T("supply: pulls from a bridge it can only read while FACING it", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 80000 } }
+  env.files["farm.blueprint"] = BP_PLAIN_SOIL
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 3, h = 1, d = 3 },
+    heading = "east", scan_y = 66,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
+      suck = "self", export_side = "north", bridge_facing = "south" },
+  }]]
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  -- the turtle can ONLY read this bridge while facing south
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "south",
+    stored = 1e6, max = 2e6, usage = 0, items = { dirt } })
+  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 10000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(countLayer(env, 100, "minecraft:farmland"), 9,
+    "tilled all 9 - it turned to face the bridge before each pull")
+end)
+
 T("supply: a worn hoe is swapped for a fresh one (no silent un-tilled cells)", function()
   -- only dirt+hoe needed (plain soil). Start with a near-broken hoe (1 use
   -- left, 9 cells to till) and stock a fresh hoe in AE. Without the swap the
