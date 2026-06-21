@@ -594,6 +594,16 @@ function Env:addMeBridge(name, o)
       for _, s in ipairs(items) do out[#out + 1] = itemView(s) end
       return out
     end,
+    -- AEApi.listCraftableItems: every item with an encoded autocraft pattern
+    -- (count may be 0). Lets the builder find ANY craftable hoe, not just a
+    -- specific one.
+    getCraftableItems = function()
+      local out = {}
+      for _, s in ipairs(items) do
+        if s.isCraftable then out[#out + 1] = itemView(s) end
+      end
+      return out
+    end,
     isCraftable = function(filter)
       if type(filter) ~= "table" and type(filter) ~= "string" then
         return false, "EMPTY_FILTER"

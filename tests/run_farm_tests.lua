@@ -1239,6 +1239,36 @@ T("supply: pulls from a bridge it can only read while FACING it", function()
     "tilled all 9 - it turned to face the bridge before each pull")
 end)
 
+-- ANY hoe tills, so the builder must not insist on a diamond hoe specifically -
+-- the operator's exact diamond hoe may have no encoded AE autocraft pattern even
+-- though they can craft it by hand. If another hoe is stocked or craftable, use
+-- it. (operator hit "no-hoe" with a diamond hoe they said was craftable.)
+T("supply: uses any craftable hoe when the configured one has no AE pattern", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 80000 } }
+  env.files["farm.blueprint"] = BP_PLAIN_SOIL
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 3, h = 1, d = 3 },
+    heading = "east", scan_y = 66,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
+      staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
+  }]]
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  -- the default diamond hoe is NOT in the grid; a netherite hoe IS craftable
+  local nhoe = env:hoeItem{ id = "minecraft:netherite_hoe", durability = 2031 }
+  nhoe.count = 0; nhoe.isCraftable = true
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt, nhoe } })
+  env.turtle.inv = {} -- no hoe to start - it must pull one from AE
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 12000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(countLayer(env, 100, "minecraft:farmland"), 9,
+    "tilled all 9 with a substitute hoe (no diamond-hoe pattern needed)")
+end)
+
 T("supply: a worn hoe is swapped for a fresh one (no silent un-tilled cells)", function()
   -- only dirt+hoe needed (plain soil). Start with a near-broken hoe (1 use
   -- left, 9 cells to till) and stock a fresh hoe in AE. Without the swap the

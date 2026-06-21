@@ -799,35 +799,61 @@ local function restock(slot, spec, minCount, batch)
     unface(); navSafe(saved.x, saved.y, saved.z); faceTo(savedHeading); clearIntent()
     return false
   end
+  -- Resolve which item to actually pull. Normally spec.name; but spec.alt lets a
+  -- generic need accept any matching variant the AE can give (e.g. ANY *_hoe -
+  -- tilling works with any hoe, and the operator's exact diamond hoe may have no
+  -- encoded autocraft pattern). Prefer the exact item if obtainable, else the
+  -- first matching item that's stocked, else the first that's craftable.
+  local target = spec.name
+  if spec.alt then
+    local function canGet(nm)
+      local it = bridge.getItem({ name = nm })
+      if it and (it.count or 0) > 0 then return true end
+      return bridge.isCraftable({ name = nm }) == true
+    end
+    if not canGet(target) then
+      for _, e in ipairs(bridge.getItems() or {}) do
+        if type(e.name) == "string" and e.name:find(spec.alt, 1, true)
+          and (e.count or 0) > 0 then target = e.name; break end
+      end
+      if not canGet(target) and bridge.getCraftableItems then
+        for _, e in ipairs(bridge.getCraftableItems() or {}) do
+          if type(e.name) == "string" and e.name:find(spec.alt, 1, true) then
+            target = e.name; break
+          end
+        end
+      end
+    end
+  end
   turtle.select(slot)
-  collectExport(slot, spec.name)
+  collectExport(slot, target)
   local function slotCount()
     local d = turtle.getItemDetail(slot)
-    return (d and d.name == spec.name) and turtle.getItemCount(slot) or 0
+    return (d and d.name == target) and turtle.getItemCount(slot) or 0
   end
-  -- Resolve the stocked count + the export filter for spec.name. A {name=}
-  -- lookup finds normal items; an NBT-keyed block (a frequency-coded ender chest)
-  -- is missed by name, so fall back to the full list and pull by FINGERPRINT (the
+  -- Resolve the stocked count + the export filter for `target`. A {name=} lookup
+  -- finds normal items; an NBT-keyed block (a frequency-coded ender chest) is
+  -- missed by name, so fall back to the full list and pull by FINGERPRINT (the
   -- operator re-keys the chest after). Returns count, exportFilter.
   local function resolveStock()
-    local it = bridge.getItem({ name = spec.name })
-    if it and (it.count or 0) > 0 then return it.count, { name = spec.name } end
+    local it = bridge.getItem({ name = target })
+    if it and (it.count or 0) > 0 then return it.count, { name = target } end
     local items = bridge.getItems()
     if type(items) == "table" then
       for _, e in ipairs(items) do
-        if e.name == spec.name and (e.count or 0) > 0 then
+        if e.name == target and (e.count or 0) > 0 then
           return e.count, { fingerprint = e.fingerprint or e.name }
         end
       end
     end
-    return 0, { name = spec.name }
+    return 0, { name = target }
   end
   if slotCount() < minCount then
     local count, filter = resolveStock()
     -- craft only if observed AE stock can't cover the request and a pattern
     -- exists; never re-issue on a job id (idempotent on observed stock)
-    if count < minCount and bridge.isCraftable({ name = spec.name }) then
-      bridge.craftItem({ name = spec.name, count = batch })
+    if count < minCount and bridge.isCraftable({ name = target }) then
+      bridge.craftItem({ name = target, count = batch })
       local deadline = os.clock() + cfg.craft_timeout
       while select(1, resolveStock()) < minCount and os.clock() < deadline do
         os.sleep(0.5)
@@ -838,7 +864,7 @@ local function restock(slot, spec, minCount, batch)
     if want >= minCount then
       filter.count = want
       local n = bridge.exportItem(filter, cfg.base.export_side or cfg.base.suck)
-      if n and n > 0 then collectExport(slot, spec.name) end
+      if n and n > 0 then collectExport(slot, target) end
     end
   end
   local got = slotCount()
@@ -885,20 +911,26 @@ local function refuelIfLow()
   return measuredRefuel(cfg.fuel_low + cfg.fuel_reserve)
 end
 
+-- ANY hoe tills, so accept any *_hoe in the slot and pull any hoe the AE can give
+-- (the operator's exact diamond hoe may have no encoded autocraft pattern even
+-- if they can craft it by hand). spec.alt = "_hoe" lets restock substitute.
+local function isHoe(name) return type(name) == "string" and name:find("_hoe", 1, true) ~= nil end
+
 local function ensureHoe()
   turtle.select(cfg.slots.hoe)
   local d = turtle.getItemDetail(cfg.slots.hoe, true)
-  if d and d.name == cfg.items.hoe then
+  local hoeSpec = { name = cfg.items.hoe, alt = "_hoe" }
+  if d and isHoe(d.name) then
     -- restock before the hoe breaks mid-plot (Q1: ~one till-op per soil cell).
-    -- A worn hoe still NAME-matches the slot, so restock's slotCount gate would
-    -- keep it; evacuate it first so a fresh hoe can be pulled into the slot.
+    -- A worn hoe still occupies the slot, so evacuate it first so a fresh one
+    -- can be pulled in.
     if d.maxDamage and (d.maxDamage - (d.damage or 0)) <= 1 then
       turtle.select(cfg.slots.hoe); turtle.dropUp() -- discard the worn hoe
-      return restock(cfg.slots.hoe, { name = cfg.items.hoe }, 1, 1)
+      return restock(cfg.slots.hoe, hoeSpec, 1, 1)
     end
     return true
   end
-  return restock(cfg.slots.hoe, { name = cfg.items.hoe }, 1, 1)
+  return restock(cfg.slots.hoe, hoeSpec, 1, 1)
 end
 
 -- ----------------------------------------------------------- build cells
