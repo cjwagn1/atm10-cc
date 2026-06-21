@@ -171,6 +171,42 @@ local function seedRefPlot(env, ox, oy, oz, w, d)
   end
 end
 
+-- The operator's REAL rig: a fused w x d, h=3 sulfur plot whose TOP surface is an
+-- accelerator/cable/ENDER-CHEST canopy over the crops, a water source at the
+-- centre, and a ground-floor ender chest at the centre column (the harvest anchor
+-- the stack centres over). dy0 = fertilized soil ring + centre water; dy1 = sulfur
+-- crops (none over the water centre); dy2 = canopy (accelerators + a cable + an
+-- ender chest). Crop age is non-zero so capture proves it drops age.
+local function seedOperatorPlot(env, ox, oy, oz, w, d)
+  local cx, cz = math.floor(w / 2), math.floor(d / 2)
+  for dx = 0, w - 1 do
+    for dz = 0, d - 1 do
+      if dx == cx and dz == cz then
+        env:setBlock(ox + dx, oy, oz + dz, { id = "minecraft:water" })
+      else
+        env:setBlock(ox + dx, oy, oz + dz,
+          { id = "farmingforblockheads:fertilized_farmland_healthy" })
+        env:setBlock(ox + dx, oy + 1, oz + dz,
+          { id = "mysticalagriculture:sulfur_crop", state = { age = 7 } })
+      end
+      -- top canopy (dy2): a cable spine down the centre row, an ender chest at the
+      -- centre, accelerators everywhere else
+      local top
+      if dx == cx and dz == cz then
+        top = "enderstorage:ender_chest"
+      elseif dx == cx then
+        top = "ae2:cable"
+      else
+        top = "mysticalagriculture:essence_farmland"
+      end
+      env:setBlock(ox + dx, oy + 2, oz + dz, { id = top })
+    end
+  end
+  -- ground-floor ender chest anchor directly under the plot centre (one below the
+  -- soil), so findEnderChest aligns the stack over it
+  env:setBlock(ox + cx, oy - 1, oz + cz, { id = "enderstorage:ender_chest" })
+end
+
 -- ------------------------------------ 0. harness: Geo Scanner mock (auto-find)
 -- AP Geo Scanner scan(radius): blocks in a cube around the turtle, coords
 -- RELATIVE to it. The turtle uses this to FIND the plot it was never told.
@@ -197,6 +233,29 @@ T("geo scanner: scan(radius) returns blocks relative to the turtle", function()
   local res = env:run("prog.lua", {}, { maxTime = 10, fromVirtualFs = true })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   eq(env:file("out"), "2,0,0\n0,-1,-1\n", "relative block positions")
+end)
+
+-- fix #2(a) harness fidelity: vendor WorldUtil.isEmptyBlock = isAir || liquid,
+-- and TurtleDetectCommand returns !isEmptyBlock - so a FLUID reads detect()==
+-- FALSE (undetected), opposite a solid. inspect() only fails on isAir, so water
+-- IS inspectable. The harness must match, or doWater's sub-floor brace test never
+-- fires on a water-over-water stack.
+T("harness: detectDown is FALSE for a fluid but inspectDown still names it", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 100, z = 0 },
+    facing = "north", fuel = 100 } }
+  env:setBlock(0, 99, 0, { id = "minecraft:water", state = { level = 0 } })
+  env.files["prog.lua"] = [[
+    local has, info = turtle.inspectDown()
+    local out = fs.open("out", "w")
+    out.writeLine(tostring(turtle.detectDown()))
+    out.writeLine(tostring(has) .. "/" .. tostring(info and info.name))
+    out.close()
+  ]]
+  current = env
+  local res = env:run("prog.lua", {}, { maxTime = 10, fromVirtualFs = true })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(env:file("out"), "false\ntrue/minecraft:water\n",
+    "fluid: detectDown false, inspectDown still names water")
 end)
 
 -- ----------------------------------------- 1. harness: turtle item-use mock
@@ -682,8 +741,10 @@ end)
 -- a bigger radius needs an explicit arg.
 T("find: default scan is the free radius 8 (a costly 16 needs an explicit arg)", function()
   local function plotAt11()
+    -- enough fuel to AFFORD the real radius-16 cost (~5274, SphereOperation),
+    -- now that the harness deducts it - the free radius 8 still can't reach 11.
     local env = CC.new{ turtle = { pos = { x = 0, y = 70, z = 0 },
-      facing = "north", fuel = 5000 } }
+      facing = "north", fuel = 10000 } }
     env:addGeoScanner("scanner")
     for dx = 0, 2 do
       for dz = 0, 2 do
@@ -955,6 +1016,103 @@ T("capture: 3D scan records layers under a top canopy (not just the top)", funct
   eq(bp.cells["0,2,0"].id, "ae2:growth_accelerator", "canopy id kept")
 end)
 
+-- fix #3: a footprint that exceeds the free radius-8 scan must NOT be silently
+-- truncated (outer columns / floor dropped behind a plausible size header). The
+-- capture either covers the whole footprint or aborts LOUDLY - never writes a
+-- blueprint with a hole the build then replicates across every stacked copy.
+-- Raising the radius is forbidden (a radius-16 scan is ~5274 fuel, the drain bug)
+-- - now that the harness deducts that cost, a "bump the radius" fix can't pass.
+T("capture: a footprint wider than the free radius-8 scan is not silently truncated", function()
+  local env = CC.new{ turtle = { pos = { x = 9, y = 66, z = 0 },
+    facing = "east", fuel = 200 } } -- too little fuel to afford a costly r>8 scan
+  env:addGeoScanner("scanner")
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 19, h = 1, d = 1 },
+    heading = "east", scan_y = 66, fleet = "farm1",
+  }]]
+  for ix = 0, 18 do env:setBlock(ix, 64, 0, { id = "minecraft:farmland" }) end
+  current = env
+  env:run(FARM, { "capture" }, { maxTime = 600 })
+  local bpText = env:file("farm.blueprint")
+  if type(bpText) == "string" then
+    local bp = loadTable(bpText, "blueprint")
+    -- if a blueprint WAS written it must be complete: both edges present
+    if not (bp.cells["0,0,0"] and bp.cells["18,0,0"]) then
+      fail("blueprint silently truncated: far-edge column 18,0,0 missing")
+    end
+  else
+    -- else it must have aborted loudly about exceeding the free radius
+    expectContains(env:termText(), "exceeds", "loud abort about the free radius")
+  end
+end)
+
+T("capture: a plot taller than the free radius-8 scan keeps its floor layer", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 73, z = 0 },
+    facing = "east", fuel = 200 } } -- scan_y = origin.y + 9, floor is 9 below
+  env:addGeoScanner("scanner")
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 1, h = 8, d = 1 },
+    heading = "east", scan_y = 73, fleet = "farm1",
+  }]]
+  for dy = 0, 7 do
+    env:setBlock(0, 64 + dy, 0,
+      { id = dy == 0 and "minecraft:farmland" or "ae2:growth_accelerator" })
+  end
+  current = env
+  env:run(FARM, { "capture" }, { maxTime = 600 })
+  local bpText = env:file("farm.blueprint")
+  if type(bpText) == "string" then
+    local bp = loadTable(bpText, "blueprint")
+    if not bp.cells["0,0,0"] then
+      fail("blueprint silently dropped the floor layer (0,0,0)")
+    end
+  else
+    expectContains(env:termText(), "exceeds", "loud abort about the free radius")
+  end
+end)
+
+-- fix #6: the Geo Scanner returns only name/x/y/z/tags per block - NEVER a
+-- blockstate (GeoScannerPeripheral.scan). So classify's axis-from-state branch is
+-- DEAD on the 3D scan path: a vertical accelerator captured by the scanner has
+-- axis==nil. The inspectDown PROBE path DOES carry state, so the same block there
+-- recovers axis=='y'. This test pins that contract so a future author can't rely
+-- on a scanner capture recovering axis (and a mock fabricating state in scan()
+-- would diverge from vendor and be caught here).
+T("capture: the Geo Scanner cannot recover a vertical axis (probe path can)", function()
+  -- (a) 3D scan path: axis is NOT recoverable
+  local e1 = CC.new{ turtle = { pos = { x = 0, y = 67, z = 0 },
+    facing = "east", fuel = 5000 } }
+  e1:addGeoScanner("scanner")
+  e1.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 1, h = 3, d = 1 },
+    heading = "east", scan_y = 67, fleet = "farm1",
+  }]]
+  e1:setBlock(0, 64, 0, { id = "farmingforblockheads:fertilized_farmland_healthy" })
+  e1:setBlock(0, 65, 0, { id = "mysticalagriculture:sulfur_crop" })
+  e1:setBlock(0, 66, 0,
+    { id = "ae2:growth_accelerator", state = { axis = "y" } }) -- vertical canopy
+  current = e1
+  e1:run(FARM, { "capture" }, { maxTime = 600 })
+  local bp1 = loadTable(e1:file("farm.blueprint"), "blueprint (scan)")
+  eq(bp1.cells["0,2,0"].kind, "block", "scanner: canopy is a block")
+  eq(bp1.cells["0,2,0"].axis, nil, "scanner: axis is NOT recoverable (no blockstate)")
+
+  -- (b) probe path (no scanner): inspectDown carries state, so axis is recovered
+  local e2 = CC.new{ turtle = { pos = { x = 0, y = 67, z = 0 },
+    facing = "east", fuel = 5000 } }
+  e2.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 1, h = 3, d = 1 },
+    heading = "east", scan_y = 67, fleet = "farm1",
+  }]]
+  e2:setBlock(0, 64, 0, { id = "farmingforblockheads:fertilized_farmland_healthy" })
+  e2:setBlock(0, 65, 0, { id = "mysticalagriculture:sulfur_crop" })
+  e2:setBlock(0, 66, 0, { id = "ae2:growth_accelerator", state = { axis = "y" } })
+  current = e2
+  e2:run(FARM, { "capture" }, { maxTime = 600 })
+  local bp2 = loadTable(e2:file("farm.blueprint"), "blueprint (probe)")
+  eq(bp2.cells["0,2,0"].axis, "y", "probe: axis recovered from inspectDown state")
+end)
+
 T("capture: re-running is idempotent (same blueprint)", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 66, z = 0 },
     facing = "east", fuel = 9000 } }
@@ -1055,6 +1213,75 @@ T("build: raising plots and re-running extends the stack", function()
     9, "plot0 intact")
   eq(countLayer(env, 102, "farmingforblockheads:fertilized_farmland_healthy"),
     9, "plot1 added by the extend re-run")
+end)
+
+-- THE operator bug: a prior failed run left ONE stray dirt block at the build
+-- corner column (cfg.build.x/z) at the plot-0 soil layer. A FRESH re-run (no
+-- journal) must NOT mistake that single block for a COMPLETE plot 0 - the old
+-- skipBuiltPlots probed only the corner column's top solid block, so a stray
+-- block reads "1 plot already built" and the REAL plot 0 is never built. A plot
+-- counts as built only if its top blueprint cell is actually present.
+T("resume: one stray block at the build corner is NOT a complete plot", function()
+  local env = buildRig{ plots = 1, blueprint = BP_3x3_NOWATER }
+  -- a stray dirt at the build corner (0,100,0) from a prior failed run; the
+  -- rest of plot 0 is empty (the failed run never got past the first cell)
+  env:setBlock(0, 100, 0, { id = "minecraft:dirt" })
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 9000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "already complete",
+    "a stray block must not read as a finished stack")
+  -- plot 0 actually gets built: the stray corner dirt is tilled+fertilized like
+  -- any cell, so all 9 soil cells end fertilized and all 9 crops are planted
+  eq(countLayer(env, 100, "farmingforblockheads:fertilized_farmland_healthy"),
+    9, "plot0 soil built despite the stray block (the real plot was NOT skipped)")
+  eq(countLayer(env, 101, "mysticalagriculture:sulfur_crop"), 9,
+    "plot0 crops built (the real plot was NOT skipped)")
+end)
+
+-- The same mis-skip at a HIGHER plot: plot 0 is genuinely complete, but a stray
+-- corner block sits at plot 1's soil layer (a prior fresh-run kill that lost its
+-- journal). A fresh re-run must build plot 1, not skip it as "2 already built".
+T("resume: a stray block above a finished plot doesn't skip the next plot", function()
+  local env = buildRig{ plots = 2, blueprint = BP_3x3_NOWATER }
+  current = env
+  env:run(FARM, { "build" }, { maxTime = 9000 })   -- build BOTH plots
+  -- now wipe plot 1 down to a single stray corner block to model a half-built
+  -- plot 1 whose journal was lost; plot 0 stays complete below it
+  for dx = 0, 2 do for dz = 0, 2 do
+    env:setBlock(dx, 102, dz, nil); env:setBlock(dx, 103, dz, nil)
+  end end
+  env:setBlock(0, 102, 0, { id = "minecraft:dirt" }) -- lone stray at plot1 corner
+  env.turtle.pos = { x = 0, y = 120, z = 0 }; env.turtle.facing = "east"
+  local res = env:run(FARM, {}, { maxTime = 9000 }) -- fresh re-run (no journal)
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "1 plot(s) already built",
+    "resumed at the partial plot 1, did not skip it as complete")
+  -- plot 1 fully rebuilt: the stray corner dirt is tilled+fertilized like any
+  -- cell, so all 9 soil cells end fertilized and all 9 crops are planted
+  eq(countLayer(env, 102, "farmingforblockheads:fertilized_farmland_healthy"),
+    9, "plot1 soil rebuilt - not skipped as complete")
+  eq(countLayer(env, 103, "mysticalagriculture:sulfur_crop"), 9,
+    "plot1 crops built")
+end)
+
+-- A prior run finished a plot's SOIL layer but was killed before the crop layer
+-- (a full lower layer, not a stray block). A fresh re-run must resume at that
+-- plot and lay the missing crops - the top solid block sits at the soil dy,
+-- BELOW the plot's top (crop) layer, so the plot is correctly counted incomplete.
+T("resume: a plot built only through its lower layer resumes its top layer", function()
+  local env = buildRig{ plots = 2, blueprint = BP_3x3_NOWATER }
+  current = env
+  env:run(FARM, { "build" }, { maxTime = 9000 })   -- build BOTH plots
+  -- strip plot 1's crop (top) layer, leaving its full soil layer below
+  for dx = 0, 2 do for dz = 0, 2 do env:setBlock(dx, 103, dz, nil) end end
+  env.turtle.pos = { x = 0, y = 120, z = 0 }; env.turtle.facing = "east"
+  local res = env:run(FARM, {}, { maxTime = 9000 }) -- fresh re-run (no journal)
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "1 plot(s) already built",
+    "plot1 soil-only is NOT complete (top crop layer missing)")
+  eq(countLayer(env, 103, "mysticalagriculture:sulfur_crop"), 9,
+    "plot1 crop layer laid on resume")
 end)
 
 T("build: stacks 2 plots, plot N+1 base = plot N base + height", function()
@@ -1209,6 +1436,45 @@ T("supply: stacks TWO water-bearing plots (emptied bucket is evacuated)", functi
   if not env:block(1, 101, 1) then fail("plot1 water has no sub-floor") end
 end)
 
+-- fix #2(b): a water cell whose brace position is occupied by a FLUID (a prior
+-- plot's water that flowed under it, or leftover flowing water). With the harness
+-- fluid-detect fix, that cell reads not-solid (detectDown()==false) - exactly as
+-- the real turtle sees it - so doWater must CLEAR the fluid and lay a solid dirt
+-- sub-floor before placing: a placeDown water braces only against the cell
+-- directly below, and a bucket can't deploy against a liquid (vendor
+-- canDeployOnBlock: isEmptyBlock(pos) is true for a liquid). Without the brace
+-- the place fails and the plot reports a dry centre ("needs hand-seeding"). The
+-- OLD air-only guard `if not detectDown()` plus the masking harness both treated
+-- the fluid as solid and skipped the brace.
+T("supply: water over a fluid brace cell clears it and lays a sub-floor (no dry cell)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 80000 } }
+  env.files["farm.blueprint"] =
+    "return {\n  size = { w = 1, h = 1, d = 1 },\n  cells = {\n"
+    .. "    [\"0,0,0\"] = { kind = \"water\" },\n  },\n}\n"
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 1, h = 1, d = 1 },
+    heading = "east", scan_y = 66,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
+      suck = "self", export_side = "north", bridge_facing = "south" },
+  }]]
+  -- the brace cell directly below the water target is a FLUID, not air or solid
+  env:setBlock(0, 99, 0, { id = "minecraft:water", state = { level = 1 } })
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local water = env:waterBucketItem(); water.count = 16; water.isCraftable = false
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "south",
+    stored = 1e6, max = 2e6, usage = 0, items = { dirt, water } })
+  env.turtle.inv = {}
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 16000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "needs hand-seeding", "no dry centre")
+  eq(env:block(0, 99, 0).id, "minecraft:dirt", "fluid brace cell cleared to dirt")
+  eq(env:block(0, 100, 0).id, "minecraft:water", "water source placed over the brace")
+end)
+
 -- THE in-game bug: a turtle reaches the ME Bridge only while FACING it (an
 -- adjacent block, not a network peripheral), and navigation leaves it facing
 -- elsewhere -> it reads an empty grid and reports "AE has nothing", even though
@@ -1303,6 +1569,25 @@ T("supply: a craft was actually issued for the out-of-stock fertilizer", functio
   -- have been crafted up then drawn down by the 8 ring applications
   -- (net: a craft happened, else the soil would be plain farmland)
   eq(countLayer(env, 100, "minecraft:farmland"), 0, "no plain farmland left")
+end)
+
+-- fix #5: if navSafe to the park fails (a blocked travel-ceiling corridor), the
+-- early `return false` must be SYMMETRIC with every other restock exit - navSafe
+-- back to the build cell, restore the saved heading, and clear the write-ahead
+-- intent. Otherwise the turtle is left parked mid-corridor facing an arbitrary
+-- direction with an orphaned `intent=restock ...` in the journal.
+T("supply: a blocked restock-park path restores heading + clears intent", function()
+  local env = supplyRig()
+  -- obstruct the travel-ceiling corridor between the build column (z=0) and the
+  -- park (z=-2) at travel_y, so the FIRST restock's navSafe to the park fails
+  env:setBlock(0, 116, -1, { id = "minecraft:stone" })
+  current = env
+  env:run(FARM, { "build" }, { maxTime = 12000 })
+  -- the restock could not reach the park, so the build halts - but the journal
+  -- must carry no orphaned intent and the turtle must be back on its build heading
+  local j = parseFarmJournal(env:file("farm.journal"))
+  if j then eq(j.intent, nil, "no orphaned restock intent left in the journal") end
+  eq(env.turtle.facing, "east", "heading restored to the build heading (not the corridor)")
 end)
 
 -- -------------------------------------------- 6. farm.lua: self-test gate
@@ -1433,6 +1718,41 @@ T("kill-resume: recovers a stranded AE export instead of double-pulling", functi
   eq(dirt.count, 0, "AE dirt never re-exported (no double-pull)")
 end)
 
+-- fix #4: a kill striking AFTER a water source materialized but BEFORE the spent
+-- bucket was evacuated leaves a minecraft:bucket stranded in the water work slot.
+-- On the NEXT water cell, restock can't merge a fresh water_bucket into a slot
+-- holding a different item, so it reads 0 and halts 'no-water'. doWater must
+-- evacuate a non-water item from the slot at the TOP of the function (idempotent
+-- across kills), before ensureItem, so the stranded empty never strands a pull.
+T("kill-resume: a stranded spent bucket in the water slot never halts 'no-water'", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 80000 } }
+  env.files["farm.blueprint"] =
+    "return {\n  size = { w = 1, h = 1, d = 1 },\n  cells = {\n"
+    .. "    [\"0,0,0\"] = { kind = \"water\" },\n  },\n}\n"
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 1, h = 1, d = 1 },
+    heading = "east", scan_y = 66,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
+      suck = "self", export_side = "north", bridge_facing = "south" },
+  }]]
+  env:setBlock(0, 99, 0, { id = "minecraft:stone" }) -- solid sub-floor
+  local water = env:waterBucketItem(); water.count = 16; water.isCraftable = false
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "south",
+    stored = 1e6, max = 2e6, usage = 0, items = { water } })
+  -- the stranded empty bucket sits in the water work slot (slots.water default 5)
+  env.turtle.inv = { [5] = { id = "minecraft:bucket", count = 1 } }
+  env.files["farm.journal"] =
+    "phase=build\nplot=0\ndy=0\npos=0,120,0\nheading=east\nselftest=done\n"
+  current = env
+  local res = env:run(FARM, {}, { maxTime = 9000 }) -- no-arg = resume
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "no-water", "did not strand on the empty bucket")
+  eq(env:block(0, 100, 0).id, "minecraft:water", "water source placed")
+end)
+
 T("kill-resume: a kill mid-second-plot resumes both plots in the stack", function()
   local env = buildRig{ plots = 2, blueprint = BP_3x3_NOWATER }
   env:restartAt(55)  -- ~mid second plot (first plot ~38s)
@@ -1444,6 +1764,53 @@ T("kill-resume: a kill mid-second-plot resumes both plots in the stack", functio
   eq(countLayer(env, 102, "farmingforblockheads:fertilized_farmland_healthy"),
     9, "plot1 completed after resume")
   eq(countLayer(env, 103, "mysticalagriculture:sulfur_crop"), 9, "plot1 crops")
+end)
+
+-- THE faceBridge kill window: with NO calibrated bridge_facing in conf, restock
+-- falls back to faceBridge(), which turns toward the bridge with RAW turtle.
+-- turnRight() - turns that do NOT update S.heading or journal. A kill while
+-- parked-and-faced-at-the-bridge then leaves the physical turtle rotated
+-- (facing the bridge) while the journal still records the pre-turn heading. On
+-- resume the build dead-reckons with the WRONG facing -> every move goes the
+-- wrong way and the whole stack lands rotated/displaced. faceBridge's turns
+-- must be journaled (like faceTo) so a kill mid-face resumes square.
+T("kill-resume: a kill while faced at the bridge (no bridge_facing) resumes square", function()
+  -- bridge ON the turtle, readable ONLY facing south, suck="self"; conf OMITS
+  -- bridge_facing so restock takes the raw-turn faceBridge() fallback. Plain
+  -- soil needs only dirt, isolating the supply turn.
+  local function mkEnv()
+    local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+      facing = "east", fuel = 80000 } }
+    env.files["farm.blueprint"] = BP_PLAIN_SOIL
+    env.files["farm.conf"] = [[return {
+      origin = { x = 0, y = 64, z = 0 }, size = { w = 3, h = 1, d = 3 },
+      heading = "east", scan_y = 66,
+      start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+      build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+      base = { bridge = "me", park = { x = 0, y = 116, z = 0 },
+        suck = "self", export_side = "north" },
+    }]]
+    local dirt = { id = "minecraft:dirt", count = 256 }
+    env:addMeBridge("me", { intoTurtle = "north", whenFacing = "south",
+      stored = 1e6, max = 2e6, usage = 0, items = { dirt } })
+    env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
+    return env
+  end
+  -- t=27 lands the kill while parked at the park (y116) having just raw-turned
+  -- east->south to read the bridge: journal heading must still == physical
+  local env = mkEnv()
+  env:restartAt(27)
+  current = env
+  env:run(FARM, { "build" }, { maxTime = 4000 })
+  local j = parseFarmJournal(env:file("farm.journal") or env:file("farm.journal.bak"))
+  if j and j.heading then
+    eq(j.heading, env.turtle.facing,
+      "journal heading must match physical facing after a kill mid-faceBridge")
+  end
+  env:run(FARM, {}, { maxTime = 8000 })   -- resume
+  -- the plot must build at its INTENDED footprint (0..2), not rotated/displaced
+  eq(countLayer(env, 100, "minecraft:farmland", 3, 3, 0, 0), 9,
+    "all 9 soil tilled at the intended footprint after a mid-face kill resume")
 end)
 
 -- --------------------------------------- 8. farm.lua: mesh orchestration
@@ -1480,6 +1847,241 @@ T("orchestration: a token-gated basectl 'update' is acked", function()
     end
   end
   eq(acks, 1, "exactly one ack (valid token only)")
+end)
+
+-- ------------------------------------ fix #1: park must never be a build cell
+-- The operator's rig: bridge ON the turtle (suck=self), the stack centred over a
+-- ground-floor ender chest, so the park column (0,0,0) lands INSIDE the build
+-- footprint. Plot 0 places a block AT the park cell; every later restock then
+-- rises to travel_y, moves over, and tries to descend onto the now-occupied park
+-- -> goDown "Movement obstructed" -> restock false -> the build mislabels the
+-- strand "no-seed" with the soil ring laid and zero crops. The park/drop must be
+-- relocated off the stack so the build completes.
+
+-- 3x3 h=2: soil ring (8 fertilized) + center water at dy0 (1,0,1); crops at dy1
+-- (none above the water center). Local cell (1,0,1) is the centre.
+local BP_RING_WATER = [[return {
+  size = { w = 3, h = 2, d = 3 },
+  cells = {
+    ["0,0,0"] = { kind = "soil", tier = "fertilized" },
+    ["0,0,1"] = { kind = "soil", tier = "fertilized" },
+    ["0,0,2"] = { kind = "soil", tier = "fertilized" },
+    ["1,0,0"] = { kind = "soil", tier = "fertilized" },
+    ["1,0,1"] = { kind = "water" },
+    ["1,0,2"] = { kind = "soil", tier = "fertilized" },
+    ["2,0,0"] = { kind = "soil", tier = "fertilized" },
+    ["2,0,1"] = { kind = "soil", tier = "fertilized" },
+    ["2,0,2"] = { kind = "soil", tier = "fertilized" },
+    ["0,1,0"] = { kind = "crop", id = "mysticalagriculture:sulfur_crop" },
+    ["0,1,1"] = { kind = "crop", id = "mysticalagriculture:sulfur_crop" },
+    ["0,1,2"] = { kind = "crop", id = "mysticalagriculture:sulfur_crop" },
+    ["1,1,0"] = { kind = "crop", id = "mysticalagriculture:sulfur_crop" },
+    ["1,1,2"] = { kind = "crop", id = "mysticalagriculture:sulfur_crop" },
+    ["2,1,0"] = { kind = "crop", id = "mysticalagriculture:sulfur_crop" },
+    ["2,1,1"] = { kind = "crop", id = "mysticalagriculture:sulfur_crop" },
+    ["2,1,2"] = { kind = "crop", id = "mysticalagriculture:sulfur_crop" },
+  },
+}
+]]
+
+T("supply: park inside the build footprint never strands the build as no-seed", function()
+  -- build cell (1,0,1) world = (-1+1, 0+0, -1+1) = (0,0,0) == park. The stray
+  -- block plot 0 places at the centre would block a park descent.
+  local env = CC.new{ turtle = { pos = { x = 0, y = 0, z = 0 },
+    facing = "north", fuel = 90000 } }
+  env.files["farm.blueprint"] = BP_RING_WATER
+  env.files["farm.conf"] = [[return {
+    origin = { x = -1, y = -2, z = -1 }, size = { w = 3, h = 2, d = 3 },
+    heading = "north", scan_y = 1,
+    start = { x = 0, y = 0, z = 0 }, start_heading = "north",
+    build = { x = -1, y = 0, z = -1 }, plots = 1, fleet = "farm1", travel_y = 8,
+    base = { bridge = "me", park = { x = 0, y = 0, z = 0 },
+      suck = "self", export_side = "north", bridge_facing = "north" },
+  }]]
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 2000 }; hoe.count = 0; hoe.isCraftable = true
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  seed.isCraftable = false
+  local water = env:waterBucketItem(); water.count = 16; water.isCraftable = false
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
+    stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    items = { dirt, hoe, fert, seed, water } })
+  env.turtle.inv = {}
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 60000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "halted", "build did not halt")
+  expectNotContains(env:termText(), "no-seed", "did not mislabel as no-seed")
+  eq(countLayer(env, 1, "mysticalagriculture:sulfur_crop", 3, 3, -1, -1), 8,
+    "all 8 crops laid (park was relocated off the stack)")
+end)
+
+T("setup: wizard keeps the park off the build stack (ender-centred, on-turtle bridge)", function()
+  -- turtle dropped roughly over the plot, on-turtle bridge readable facing north,
+  -- an ender chest at the plot centre so the stack centres over it -> the drop
+  -- column would otherwise be a build cell. The wizard must relocate the park.
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "north", fuel = 90000 } }
+  -- a 3x3 plot just below the turtle, with an ender chest at its centre column
+  seedRefPlot(env, -1, 77, -1, 3, 3)
+  env:setBlock(0, 76, 0, { id = "enderstorage:ender_chest" }) -- ground-floor anchor
+  env:addGeoScanner("scanner")
+  local dirt = { id = "minecraft:dirt", count = 2554 }
+  local hoe = env:hoeItem{ durability = 2000 }; hoe.count = 0; hoe.isCraftable = true
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 0 })
+  seed.isCraftable = true
+  local water = env:waterBucketItem(); water.count = 16; water.isCraftable = false
+  local ender = { id = "enderstorage:ender_chest", count = 4, nbtKeyed = true,
+    fingerprint = "ender#wWw" }
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
+    stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    items = { dirt, hoe, fert, seed, water, ender } })
+  env.turtle.inv = {}
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 120000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  local conf = loadTable(env:file("farm.conf"), "farm.conf")
+  local b, sz, pk = conf.build, conf.size, conf.base.park
+  local horiz = pk.x >= b.x and pk.x < b.x + sz.w and pk.z >= b.z and pk.z < b.z + sz.d
+  local vert = pk.y >= b.y and pk.y < b.y + conf.plots * sz.h
+  if horiz and vert then
+    fail(("park %d,%d,%d is INSIDE the build footprint"):format(pk.x, pk.y, pk.z))
+  end
+  expectNotContains(env:termText(), "no-seed", "build completed, not stranded")
+end)
+
+-- ===================================================================== e2e
+-- One comprehensive end-to-end drive of the operator's REAL rig, exercising
+-- every load-bearing fix together: a facing-gated on-turtle bridge (whenFacing/
+-- intoTurtle), an autocraft-heavy AE (hoe/fert/seed craftable, dirt stocked, a
+-- fingerprint-keyed ender chest), a 17x6 h=3 canopy plot captured without
+-- truncation (fix #3, exactly the radius-8 boundary), ender-centred 2-plot
+-- stacking with the park kept off the stack (fix #1), water bracing on the stack
+-- (fix #2), and a stray-block resume that must NOT mis-skip the real plot.
+T("e2e: operator scenario - on-turtle bridge, autocraft AE, canopy plot, ender-centred 2-plot stack, resume after a partial build", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "north", fuel = 200000 } } -- facing north: on-turtle bridge readable
+  -- the operator's fused 17x6 h=3 plot just below + south of the turtle (so the
+  -- turtle's own drop column sits off the build footprint and stays navigable
+  -- across the resume), with a canopy and a ground-floor ender-chest anchor at
+  -- its centre column
+  seedOperatorPlot(env, -8, 76, 1, 17, 6)
+  env:addGeoScanner("scanner") -- free radius-8 path (17 wide is the boundary)
+  -- the facing-gated, into-turtle bridge: autocraft hoe/fert/seed, dirt STOCKED,
+  -- a fingerprint-keyed ender chest pulled by fingerprint, canopy blocks present
+  local dirt = { id = "minecraft:dirt", count = 2554 }
+  local hoe = env:hoeItem{ durability = 2000 }; hoe.count = 0; hoe.isCraftable = true
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 0 })
+  seed.isCraftable = true
+  local water = env:waterBucketItem(); water.count = 64; water.isCraftable = false
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  local accel = { id = "mysticalagriculture:essence_farmland", count = 999 }
+  local cable = { id = "ae2:cable", count = 999 }
+  local ender = { id = "enderstorage:ender_chest", count = 9, nbtKeyed = true,
+    fingerprint = "ender#wWw" }
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
+    stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    items = { dirt, hoe, fert, seed, water, coal, accel, cable, ender } })
+  env.turtle.inv = {}
+  current = env
+
+  -- ----- PHASE 1: setup + build -----
+  local res1 = env:run(FARM, { "setup", "2" }, { maxTime = 400000 })
+  eq(res1.reason, "done", "setup/build reason (err=" .. tostring(res1.err) .. ")")
+  expectNotContains(env:termText(), "halted", "build did not halt")
+  expectNotContains(env:termText(), "no-seed", "no seed strand")
+  expectNotContains(env:termText(), "no-water", "no water strand")
+  expectNotContains(env:termText(), "needs hand-seeding", "no dry centre")
+  expectNotContains(env:termText(), "exceeds", "capture not truncated (17 fits r8)")
+
+  local conf = loadTable(env:file("farm.conf"), "farm.conf")
+  eq(conf.base.suck, "self", "bridge on the turtle")
+  eq(conf.base.export_side, "north", "export side")
+  eq(conf.base.bridge_facing, "north", "bridge facing")
+  eq(conf.plots, 2, "two stacked plots")
+  -- fix #1: the park / drop must be OFF the build footprint so restocks never
+  -- strand on their own park (the relocation logic itself is pinned by the two
+  -- dedicated fix-#1 tests; here we assert the end-to-end invariant holds)
+  local b, sz, pk = conf.build, conf.size, conf.base.park
+  local horiz = pk.x >= b.x and pk.x < b.x + sz.w and pk.z >= b.z and pk.z < b.z + sz.d
+  local vert = pk.y >= b.y and pk.y < b.y + conf.plots * sz.h
+  if horiz and vert then
+    fail(("park %d,%d,%d is INSIDE the build footprint"):format(pk.x, pk.y, pk.z))
+  end
+  -- fix #3: blueprint integrity - outer-ring columns AND the floor layer present
+  local bp = loadTable(env:file("farm.blueprint"), "farm.blueprint")
+  eq(sz.w, 17, "captured full width"); eq(sz.d, 6, "captured full depth")
+  eq(sz.h, 3, "captured full height")
+  if not bp.cells["0,0,0"] then fail("blueprint floor corner 0,0,0 missing") end
+  if not bp.cells["16,0,5"] then fail("blueprint far-edge floor 16,0,5 missing") end
+  if not bp.cells["0,2,0"] then fail("blueprint canopy corner 0,2,0 missing") end
+
+  -- physical build frame: turtle started at world (0,80,0); build is dead-reckoned
+  -- relative to start (0,0,0), so physical = world-start + relative.
+  local px0 = 0 + b.x          -- -8
+  local pz0 = 0 + b.z          -- -3
+  local py0 = 80 + b.y         -- plot0 base (soil) world Y
+  local H = sz.h
+  for plot = 0, 1 do
+    local soilY = py0 + plot * H
+    local cropY = soilY + 1
+    local canopyY = soilY + 2
+    eq(countLayer(env, soilY, "farmingforblockheads:fertilized_farmland_healthy",
+      17, 6, px0, pz0), 17 * 6 - 1, "plot " .. plot .. " fertilized soil ring")
+    eq(countLayer(env, cropY, "mysticalagriculture:sulfur_crop",
+      17, 6, px0, pz0), 17 * 6 - 1, "plot " .. plot .. " crop layer")
+    -- centre water (a source) in BOTH copies
+    eq(env:block(px0 + 8, soilY, pz0 + 3).id, "minecraft:water",
+      "plot " .. plot .. " centre water source")
+    -- the bulk canopy accelerators are pulled+placed in BOTH copies (the ender
+    -- chest + cable are NBT/frequency-keyed harvest infrastructure the builder
+    -- skips by design - "place these yourself" - so they are not asserted placed)
+    if countLayer(env, canopyY, "mysticalagriculture:essence_farmland",
+      17, 6, px0, pz0) < 80 then
+      fail("plot " .. plot .. " canopy accelerators missing")
+    end
+  end
+  -- the keyed harvest infrastructure was skipped LOUDLY (design: external harvest)
+  expectContains(env:termText(), "skipping enderstorage:ender_chest",
+    "the fingerprint-keyed ender chest is skipped loudly, not silently")
+
+  -- ----- PHASE 2: resume after a PARTIAL build (must NOT mis-skip) -----
+  -- fresh-run state: drop the journal so skipBuiltPlots runs; keep conf+blueprint
+  env.files["farm.journal"] = nil
+  env.files["farm.journal.bak"] = nil
+  -- wipe everything plot 1 (the top copy) placed EXCEPT one stray block at its
+  -- corner-column soil layer (dy0). Plot 0 stays genuinely complete.
+  local p1soilY = py0 + 1 * H
+  for dx = 0, 16 do
+    for dz = 0, 5 do
+      for dyy = 0, 2 do
+        if not (dx == 0 and dz == 0 and dyy == 0) then
+          env.world[(px0 + dx) .. "," .. (p1soilY + dyy) .. "," .. (pz0 + dz)] = nil
+        end
+      end
+    end
+  end
+  -- ensure the stray block IS present at plot1 corner dy0
+  env:setBlock(px0, p1soilY, pz0, { id = "minecraft:dirt" })
+  -- re-stock the AE for the rebuild (counts were drawn down)
+  fert.count = 0; seed.count = 0
+  env.turtle.pos = { x = 0, y = 80, z = 0 }; env.turtle.facing = "north"
+  env.turtle.inv = {}
+
+  local res2 = env:run(FARM, {}, { maxTime = 400000 }) -- bare resume
+  eq(res2.reason, "done", "resume reason (err=" .. tostring(res2.err) .. ")")
+  expectContains(env:termText(), "1 plot(s) already built",
+    "plot 0 counted as built")
+  expectNotContains(env:termText(), "stack already complete",
+    "the stray block at plot1 dy0 did NOT count plot1 as built")
+  -- the real plot 1 was rebuilt, not skipped
+  eq(countLayer(env, p1soilY + 1, "mysticalagriculture:sulfur_crop",
+    17, 6, px0, pz0), 17 * 6 - 1, "plot 1 crop layer fully laid on resume")
+  eq(env:block(px0 + 8, p1soilY, pz0 + 3).id, "minecraft:water",
+    "plot 1 centre water rebuilt")
 end)
 
 -- ----------------------------------------------------------------- runner

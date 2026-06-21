@@ -721,6 +721,18 @@ function Env:addGeoScanner(name, o)
       end
       local t = env.turtle
       if not t then return nil, "No turtle" end
+      -- AP SphereOperation cost: radius <= 8 is FREE; beyond that it costs fuel
+      -- floor(((2r+1)^3 - 17^3) * 0.17) (SphereOperation.getCost, maxFreeRadius=8,
+      -- extraBlockCost=0.17 - a radius-16 scan is ~5274 fuel). A scan with too
+      -- little fuel fails (nil + reason), so a "just bump the radius" capture fix
+      -- can't pass for free.
+      local free = o.maxFreeRadius or 8
+      if radius > free and t.fuel ~= "unlimited" then
+        local cost = math.floor(((2 * radius + 1) ^ 3 - (2 * free + 1) ^ 3)
+          * (o.extraBlockCost or 0.17))
+        if t.fuel < cost then return nil, "Not enough fuel for the scan operation" end
+        t.fuel = t.fuel - cost
+      end
       local out = {}
       for k, b in pairs(env.world) do
         local x, y, z = k:match("^(-?%d+),(-?%d+),(-?%d+)$")
@@ -1469,9 +1481,15 @@ local function buildTurtleApi(env, osT)
     return true
   end
 
+  -- Vendor WorldUtil.isEmptyBlock(state) = state.isAir() || state.liquid(), and
+  -- TurtleDetectCommand returns !isEmptyBlock - so a FLUID reads detect FALSE
+  -- (undetected), like air. inspect() is unchanged (it only fails on isAir, so
+  -- water IS inspectable). This is load-bearing: it lets doWater's sub-floor
+  -- brace test see a fluid as not-solid, exactly as the real turtle does.
   local function detect(dir)
     local x, y, z = targetCell(dir)
-    return env.world[keyOf(x, y, z)] ~= nil
+    local b = env.world[keyOf(x, y, z)]
+    return b ~= nil and b.id ~= "minecraft:water" and b.id ~= "minecraft:lava"
   end
   function T.detect() return detect("front") end
   function T.detectUp() return detect("up") end

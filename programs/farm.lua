@@ -242,6 +242,43 @@ local function navSafe(tx, ty, tz)
   return true
 end
 
+-- The restock park / drop cell must NEVER be a build cell. With the bridge ON
+-- the turtle (suck=self) the stack is centred over a ground-floor ender chest,
+-- so the drop column (cfg.start, mirrored by cfg.base.park) can sit INSIDE the
+-- horizontal build footprint, and on the on-foot path build.y == park.y, so the
+-- park is inside the vertical span too. Plot 0 then places a block AT the park
+-- cell; thereafter every restock rises to travel_y, moves over, and tries to
+-- descend onto the now-occupied park -> goDown "Movement obstructed" -> restock
+-- false -> the build mislabels the strand "no-seed". Detect that overlap
+-- (horizontal AND vertical - necessary and sufficient) and slide the park one
+-- cell at a time off the stack along the bridge axis (bridge_facing for an
+-- on-turtle bridge, else export_side), keeping it reachable beside the bridge.
+local function parkInFootprint(park)
+  if not (park and cfg.build and cfg.size) then return false end
+  local bx, bz, w, d = cfg.build.x, cfg.build.z, cfg.size.w, cfg.size.d
+  local horiz = park.x >= bx and park.x < bx + w and park.z >= bz and park.z < bz + d
+  local vSpan = cfg.build.y + (cfg.plots or 1) * cfg.size.h
+  local vert = park.y >= cfg.build.y and park.y < vSpan
+  return horiz and vert
+end
+
+local function relocatePark()
+  local park = cfg.base and cfg.base.park
+  if not parkInFootprint(park) then return true end
+  -- slide horizontally along the bridge axis until clear of the footprint
+  local axis = (cfg.base.suck == "self" and cfg.base.bridge_facing)
+    or cfg.base.export_side or cfg.base.bridge_facing
+  local v = DIRV[axis]
+  if v and (v.x ~= 0 or v.z ~= 0) then
+    local np = { x = park.x, y = park.y, z = park.z }
+    for _ = 1, math.max(cfg.size.w, cfg.size.d) + 1 do
+      np.x = np.x + v.x; np.z = np.z + v.z
+      if not parkInFootprint(np) then cfg.base.park = np; return true end
+    end
+  end
+  return false -- couldn't find a safe cell off the stack
+end
+
 -- ------------------------------------------------------------- classify
 
 -- Map an inspected block to a normalized blueprint cell. Fertilized farmland is
@@ -259,7 +296,12 @@ local function classify(name, state)
     return { kind = "crop", id = name }
   end
   -- accelerator / cable / harvester pylon / ender chest / anything else: copy
-  -- verbatim, keeping a vertical power axis if the captured facing has one
+  -- verbatim, keeping a vertical power axis if the captured facing has one.
+  -- NOTE: `state` is only ever populated on the inspectDown/probe path - the Geo
+  -- Scanner's scan() returns name/x/y/z/tags ONLY, NEVER a blockstate
+  -- (GeoScannerPeripheral.scan), so on the 3D scan path `state` is nil and axis
+  -- is unrecoverable. Do NOT rely on axis after a scanner capture; derive any
+  -- vertical orientation from name/tags instead if a future build needs it.
   local c = { kind = "block", id = name }
   if state and (state.axis == "y" or state.facing == "up" or state.facing == "down") then
     c.axis = "y"
@@ -608,6 +650,23 @@ local function captureScan3D()
   local w, h, d = cfg.size.w, cfg.size.h, cfg.size.d
   local cx = cfg.origin.x + math.floor(w / 2)
   local cz = cfg.origin.z + math.floor(d / 2)
+  -- The largest |offset| any in-range cell has from the scan centre (cx, scan_y,
+  -- cz). A free scan only reaches +-8, so if the footprint pushes any column or
+  -- the floor past that, a single radius-8 scan would silently drop those cells
+  -- and write a blueprint with a plausible size header but a hole. Raising the
+  -- radius is forbidden (a radius-16 scan is ~5274 fuel - the drain bug), so
+  -- abort LOUDLY instead of capturing a truncated plot (fix #3).
+  local need = math.max(
+    math.floor(w / 2), w - 1 - math.floor(w / 2),
+    math.floor(d / 2), d - 1 - math.floor(d / 2),
+    cfg.scan_y - cfg.origin.y, (cfg.origin.y + h - 1) - cfg.scan_y)
+  if need > SCAN_RADIUS then
+    print(("farm: plot footprint (need radius %d) exceeds the free radius-%d "
+      .. "scan; capture would drop the edges. Shrink the plot or re-place me so "
+      .. "the whole footprint is within %d of the scan centre.")
+      :format(need, SCAN_RADIUS, SCAN_RADIUS))
+    return false
+  end
   if not navTo(cx, cfg.scan_y, cz) then
     print("farm: capture couldn't reach the plot centre.")
     return false
@@ -624,7 +683,9 @@ local function captureScan3D()
     local dy = (cfg.scan_y + b.y) - cfg.origin.y
     local iz = cz + b.z - cfg.origin.z
     if ix >= 0 and ix < w and dy >= 0 and dy < h and iz >= 0 and iz < d then
-      cells[key(ix, dy, iz)] = classify(b.name, b.state)
+      -- the Geo Scanner returns no blockstate (only name/x/y/z/tags), so pass
+      -- nil explicitly rather than pretend b.state exists (it never does here)
+      cells[key(ix, dy, iz)] = classify(b.name, nil)
     end
   end
   navTo(cfg.origin.x, cfg.scan_y, cfg.origin.z)
@@ -720,11 +781,18 @@ end
 -- sees it; report the right-turns taken so the caller UNDOES them only AFTER it
 -- has finished talking to the bridge (the handle is valid only while I face it).
 -- Must be called while parked ADJACENT to the bridge.
+-- Each turn updates S.heading + journals (like faceTo) WHEN a build state exists,
+-- so a kill while faced at the bridge resumes square (C5): without this the raw
+-- turn rotated the physical turtle while the journal kept the pre-turn heading,
+-- and the resumed build dead-reckoned rotated. The wizard calls this before any
+-- build state (S == nil) and tracks its own turns, so the journal is untouched
+-- there.
 local function faceBridge()
   for turns = 0, 3 do
     local b, n = findBridge()
     if b then return b, n, turns end
     turtle.turnRight()
+    if S and S.heading then S.heading = RIGHTD[S.heading]; saveJournal() end
   end
   return nil, nil, 0 -- full circle, no net rotation
 end
@@ -778,25 +846,28 @@ local function restock(slot, spec, minCount, batch)
   local saved, savedHeading = copyPos(S.pos), S.heading
   intent("restock " .. spec.name)
   if not navSafe(cfg.base.park.x, cfg.base.park.y, cfg.base.park.z) then
+    -- a blocked travel-ceiling corridor: be symmetric with every other restock
+    -- exit (don't leave the turtle mid-corridor facing an arbitrary way with an
+    -- orphaned intent) - navSafe back, restore the heading, clear the intent.
+    navSafe(saved.x, saved.y, saved.z); faceTo(savedHeading); clearIntent()
     return false
   end
   -- FACE the bridge before reading it. A turtle reaches an adjacent peripheral
   -- only on a side it faces; navigation left me facing some other way, so a handle
   -- wrapped elsewhere silently reads an empty grid (the "AE has nothing" bug).
   -- Prefer the calibrated facing (faceTo journals it -> kill-safe); else turn
-  -- until I find it. Re-wrap fresh once facing it.
-  local undoTurns = 0
+  -- until I find it. Both branches journal the facing (faceBridge updates
+  -- S.heading like faceTo), so the heading is restored by the journaling
+  -- faceTo(savedHeading) below - no raw "undo turns" that would re-desync the
+  -- journal from the physical turtle on a kill (C5).
   if cfg.base.bridge_facing then
     faceTo(cfg.base.bridge_facing)
     bridge = findBridge()
   else
-    bridge, _, undoTurns = faceBridge()
-  end
-  local function unface()
-    for _ = 1, undoTurns do turtle.turnLeft() end
+    bridge = faceBridge()
   end
   if not bridge then
-    unface(); navSafe(saved.x, saved.y, saved.z); faceTo(savedHeading); clearIntent()
+    navSafe(saved.x, saved.y, saved.z); faceTo(savedHeading); clearIntent()
     return false
   end
   -- Resolve which item to actually pull. Normally spec.name; but spec.alt lets a
@@ -868,7 +939,9 @@ local function restock(slot, spec, minCount, batch)
     end
   end
   local got = slotCount()
-  unface() -- undo any raw faceBridge turns before navigating away
+  -- faceTo(savedHeading) journals the heading restoration from wherever the
+  -- face-the-bridge turns left me (both branches updated S.heading), so a kill
+  -- anywhere in here leaves the journal heading == the physical turtle.
   navSafe(saved.x, saved.y, saved.z)
   faceTo(savedHeading)
   clearIntent()
@@ -995,6 +1068,18 @@ local function doCrop(cropId)
 end
 
 local function doWater()
+  -- Evacuate a stranded spent bucket (minecraft:bucket) from the water slot FIRST
+  -- - before any converge guard - so a kill that struck after the water
+  -- materialized but before the bottom-of-function evac never leaves the slot
+  -- occupied by the wrong item (which would block the NEXT water cell's restock
+  -- and halt 'no-water'). Idempotent across kills and the water-already-present
+  -- converge path (fix #4).
+  do
+    local d = turtle.getItemDetail(cfg.slots.water)
+    if d and d.name ~= cfg.items.water then
+      turtle.select(cfg.slots.water); turtle.dropUp()
+    end
+  end
   local cur = nameBelow()
   if cur == "minecraft:water" then return true end -- already placed (converge)
   if cur then return true end
@@ -1004,11 +1089,19 @@ local function doWater()
   -- is open, then return to the stance. This is what makes water on a STACKED
   -- plot autonomous (the cell below is the prior plot's air center).
   if not navTo(S.pos.x, S.pos.y - 1, S.pos.z) then return false, "water-nav" end
-  if not turtle.detectDown() then
+  -- The brace must be SOLID: a fluid below reads detectDown()==false and a
+  -- BlockItem can't be placed into a liquid, so a stacked water-over-water cell
+  -- needs the fluid cleared and a dirt brace laid (the cell below is the prior
+  -- plot's water source). inspectDown names a fluid (detect can't), so probe it.
+  local has, info = turtle.inspectDown()
+  local solidBelow = has and info.name ~= "minecraft:water"
+    and info.name ~= "minecraft:lava"
+  if not solidBelow then
     if not ensureItem(cfg.slots.dirt, { name = cfg.items.dirt }, 1) then
       navTo(S.pos.x, S.pos.y + 1, S.pos.z)
       return false, "no-subfloor"
     end
+    if has then turtle.digDown() end -- clear the fluid so dirt can deploy
     turtle.select(cfg.slots.dirt)
     intent("subfloor"); turtle.placeDown(); clearIntent()
   end
@@ -1230,25 +1323,61 @@ local function selfTest()
   return true
 end
 
+-- The corner column's highest blueprint-occupied layer (dy in [0,h-1]). A plot
+-- is "complete" only when the world has a block at THIS dy of that plot - every
+-- blueprint cell (soil->farmland, crop, water, infra block) leaves something
+-- detectDown sees, so the top occupied cell present means the plot was finished
+-- to its top layer, not just touched at the corner. nil if the corner column is
+-- entirely air in the blueprint (an L-shaped plot whose min corner is empty).
+local function cornerTopDy()
+  local top
+  for dy = 0, bp.size.h - 1 do
+    if bp.cells[key(0, dy, 0)] then top = dy end
+  end
+  return top
+end
+
 -- On a FRESH build (no journal), an operator re-run over an already-built or
 -- extended stack must not descend into a plot buried under finished plots above
 -- it (navSafe can't pass through them) and must not re-converge a finished plot
--- (whose soil-layer stance is its own occupied crop layer). Probe the corner
--- column from the top: the highest solid block tells how many plots are already
--- built, so resume at the FIRST plot above them. A partial build keeps its
--- journal and resumes via that instead, so a fresh build only ever sees empty
--- or completed plots below the resume point.
+-- (whose soil-layer stance is its own occupied crop layer). Count the COMPLETE
+-- plots from the bottom up: a plot counts only when its TOP blueprint cell is
+-- actually present at the corner column - so a stray block or a half-built layer
+-- left by a prior failed run is NOT mistaken for a finished plot (the in-game
+-- bug: one stray dirt at the build corner skipped the real build). resume at the
+-- first plot that is not complete. A partial build keeps its journal and resumes
+-- via that instead, so a fresh build only ever sees empty or completed plots
+-- below the resume point.
 local function skipBuiltPlots()
   if not navSafe(cfg.build.x, cfg.travel_y, cfg.build.z) then return end
+  -- descend onto the TOP of the stack (the corner column is the built blocks, so
+  -- the turtle can only reach the topmost solid block, not probe buried layers)
   while not turtle.detectDown() and S.pos.y > cfg.build.y do
     if not goDown() then break end
   end
   if not turtle.detectDown() then return end -- nothing built: stay at plot 0
-  local built = math.floor((S.pos.y - 1 - cfg.build.y) / bp.size.h) + 1
-  S.plot, S.dy = math.min(built, cfg.plots), 0
-  if S.plot >= cfg.plots then
-    print("farm: stack already complete - nothing to build.")
+  local h = bp.size.h
+  local topY = S.pos.y - 1                       -- Y of the highest solid block
+  local plotOfTop = math.floor((topY - cfg.build.y) / h)
+  local dyOfTop = topY - cfg.build.y - plotOfTop * h
+  local topDy = cornerTopDy()
+  -- The highest solid block tells how far the prior run got. A plot is COMPLETE
+  -- only when that block reaches the plot's TOP blueprint layer (topDy): a stray
+  -- block or a half-built top layer sits at a LOWER dy, so its plot is NOT
+  -- counted and the resume re-builds it (converge skips what's already there).
+  -- Without a known topDy (an all-air corner column) fall back to "any block in
+  -- a plot's span counts that plot built" - the old, less strict heuristic.
+  local built
+  if topDy and dyOfTop < topDy then
+    built = plotOfTop                       -- top plot is partial: rebuild it
   else
+    built = plotOfTop + 1                   -- top plot reached its top layer
+  end
+  built = math.min(math.max(built, 0), cfg.plots)
+  S.plot, S.dy = built, 0
+  if built >= cfg.plots then
+    print("farm: stack already complete - nothing to build.")
+  elseif built > 0 then
     print(("farm: %d plot(s) already built, extending from plot %d")
       :format(built, S.plot))
   end
@@ -1259,6 +1388,16 @@ local function runBuild()
   bp = loadBlueprint()
   if not bp then
     print("farm: no blueprint - run 'farm capture' first.")
+    return
+  end
+  -- The park/drop must be off the build stack, or every restock strands on the
+  -- now-occupied park and the build mislabels it "no-seed" (fix #1). Relocate it
+  -- along the bridge axis; if no safe cell exists, fail LOUDLY rather than build
+  -- a plot that can never restock.
+  if not relocatePark() then
+    S.err = "park-in-stack"; saveJournal()
+    print("farm: park is inside the build column - move the turtle/bridge off "
+      .. "the stack (the drop cell can't be a build cell).")
     return
   end
   bridge = findBridge()
@@ -1569,6 +1708,20 @@ local function runWizard(plotCount)
   }
   writeFile(CONF_PATH, serializeConf(gen))
   cfg = loadConf() -- reload through the defaulter (items/cadence/etc.)
+  -- The stack is centred over a ground-floor ender chest, so the drop column
+  -- (0,0,0) can sit INSIDE the build footprint. Slide the park off the stack now
+  -- and persist it, so the build never strands a restock on its own park (fix #1).
+  if parkInFootprint(cfg.base.park) then
+    if relocatePark() then
+      gen.base.park = cfg.base.park
+      writeFile(CONF_PATH, serializeConf(gen))
+      print(("farm: park kept off the build stack at %d,%d,%d.")
+        :format(gen.base.park.x, gen.base.park.y, gen.base.park.z))
+    else
+      print("farm: WARNING - couldn't keep the park off the build stack; move "
+        .. "the turtle/bridge so the drop cell isn't a build cell.")
+    end
+  end
   print(("farm: configured. Stacking %d copies above your plot."):format(plotCount))
   print("farm: capturing your plot...")
   S = { pos = { x = 0, y = 0, z = 0 }, heading = heading, phase = "capture" }
