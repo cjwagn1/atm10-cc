@@ -1899,6 +1899,10 @@ end
 local function buildFsApi(env)
   local FS = {}
   function FS.exists(path) return env.files[path] ~= nil end
+  function FS.getSize(path)
+    local d = env.files[path]
+    return type(d) == "string" and #d or 0
+  end
   function FS.open(path, mode)
     if mode == "r" then
       local data = env.files[path]

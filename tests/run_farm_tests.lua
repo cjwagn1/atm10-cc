@@ -1099,6 +1099,57 @@ T("hold: a mid-build kill-resume skips the boot window (resumes unattended)", fu
     "resumed and finished without waiting for a key")
 end)
 
+-- The CC terminal can't scroll and the output is long, so the operator can't get
+-- it to me. Everything the turtle prints is mirrored to farm.log (share with
+-- `pastebin put farm.log`); verbose mode also traces every real-world step so I
+-- can debug + model the sim against what actually happened.
+T("log: terminal output is mirrored to farm.log", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100 } }
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 5, items = { { id = "minecraft:dirt", count = 256 } } })
+  current = env
+  env:run(FARM, { "ae" }, { maxTime = 60 })
+  local log = env:file("farm.log")
+  eq(type(log) == "string", true, "farm.log written")
+  expectContains(log or "", "PULL OK", "the on-screen narrative is captured in the log")
+end)
+
+T("log: 'farm log clear' wipes the log file", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100 } }
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 5, items = { { id = "minecraft:dirt", count = 256 } } })
+  current = env
+  env:run(FARM, { "ae" }, { maxTime = 60 })
+  eq(type(env:file("farm.log")) == "string", true, "log exists before clear")
+  env:run(FARM, { "log", "clear" }, { maxTime = 10 })
+  eq(env:file("farm.log"), nil, "log cleared")
+end)
+
+T("log: step tracing is off by default, 'farm log on' enables it", function()
+  local env = buildRig()
+  current = env
+  env:run(FARM, { "build" }, { maxTime = 4000 })
+  expectNotContains(env:file("farm.log") or "", "[t]", "no step trace without verbose")
+  env:run(FARM, { "log", "on" }, { maxTime = 10 })
+  env.files["farm.log"] = nil -- fresh log for the verbose run
+  env.turtle.pos = { x = 0, y = 120, z = 0 }; env.turtle.facing = "east"
+  env:run(FARM, { "build" }, { maxTime = 4000 }) -- converge re-run; still moves
+  expectContains(env:file("farm.log") or "", "[t]", "step trace present with verbose")
+end)
+
+T("log: 'farm log' reports the file and how to share it", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100 } }
+  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+    usage = 5, items = { { id = "minecraft:dirt", count = 256 } } })
+  current = env
+  env:run(FARM, { "ae" }, { maxTime = 60 })
+  env:run(FARM, { "log" }, { maxTime = 10 })
+  expectContains(env:termText(), "pastebin put farm.log", "told the operator how to share it")
+end)
+
 -- ------------------------------------------- 3. farm.lua: capture (Q3)
 -- Inspect-traversal of a reference plot -> normalized blueprint. Fertilized
 -- farmland becomes a soil recipe (build = dirt + till + fertilize), never a

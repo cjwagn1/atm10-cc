@@ -14,6 +14,8 @@ Commands:
   farm build       self-test, then build the stack (resumes if interrupted)
   farm selftest    run the startup self-tests only, build nothing
   farm ae          diagnose the AE link (stock pull + a real craft probe)
+  farm log         show the debug log (on|off step trace, clear); share it with
+                   `pastebin put farm.log`
   farm hold        park at the shell; don't auto-build on boot (for inspecting)
   farm go          clear the hold and build now
   farm release     clear the hold, stay at the shell
@@ -31,6 +33,42 @@ local BLUEPRINT    = "farm.blueprint"
 local JOURNAL_PATH = "farm.journal"
 local PROTOCOL     = "telemetry"
 local CTL_PROTOCOL = "basectl"
+local LOG_PATH     = "farm.log"
+local VERBOSE_FLAG = "farm.verbose"
+local LOG_CAP      = 50000 -- ~50KB; the log self-trims to the last half past this
+
+-- Persistent logging. The CC terminal can't scroll and a run's output is long,
+-- so EVERYTHING the turtle prints is mirrored to farm.log (capped). In verbose
+-- mode (the farm.verbose flag, set by `farm log on`) every real-world step
+-- (move/turn/build/AE) is traced too - a full record to debug from and to model
+-- the emulator against what actually happened. Share it: `pastebin put farm.log`.
+local VERBOSE = fs.exists(VERBOSE_FLAG)
+local function logRaw(s)
+  local f = fs.open(LOG_PATH, "a")
+  if not f then return end
+  f.writeLine(s)
+  f.close()
+  if fs.getSize and fs.getSize(LOG_PATH) > LOG_CAP then
+    local rf = fs.open(LOG_PATH, "r")
+    if rf then
+      local all = rf.readAll(); rf.close()
+      local keep = all:sub(-math.floor(LOG_CAP / 2)):gsub("^[^\n]*\n", "")
+      local wf = fs.open(LOG_PATH, "w")
+      if wf then wf.write("...[log trimmed]\n" .. keep); wf.close() end
+    end
+  end
+end
+local _print = print
+print = function(...)
+  _print(...)
+  local parts = {}
+  for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+  logRaw(("[%8.2f] %s"):format(os.clock(), table.concat(parts, "\t")))
+end
+-- a verbose-only real-world step trace (no-op unless `farm log on`)
+local function trace(msg)
+  if VERBOSE then logRaw(("[%8.2f] [t] %s"):format(os.clock(), msg)) end
+end
 
 local DIRV = {
   north = { x = 0, z = -1 }, south = { x = 0, z = 1 },
@@ -184,6 +222,7 @@ end
 -- operator's single placement at cfg.start). CC has no GPS here.
 
 local function faceTo(dir)
+  local from = S.heading
   while S.heading ~= dir do
     if RIGHTD[S.heading] == dir then
       turtle.turnRight(); S.heading = RIGHTD[S.heading]
@@ -194,6 +233,7 @@ local function faceTo(dir)
     end
     saveJournal()
   end
+  if from ~= dir then trace(("turn %s -> %s"):format(tostring(from), dir)) end
 end
 
 local function goFwd()
@@ -202,19 +242,32 @@ local function goFwd()
     S.pos.x = S.pos.x + DIRV[S.heading].x
     S.pos.z = S.pos.z + DIRV[S.heading].z
     saveJournal()
+    trace(("fwd -> %d,%d,%d (%s)"):format(S.pos.x, S.pos.y, S.pos.z, S.heading))
+  else
+    trace("fwd BLOCKED: " .. tostring(err))
   end
   return ok, err
 end
 
 local function goUp()
   local ok, err = turtle.up()
-  if ok then S.pos.y = S.pos.y + 1; saveJournal() end
+  if ok then
+    S.pos.y = S.pos.y + 1; saveJournal()
+    trace(("up -> %d,%d,%d"):format(S.pos.x, S.pos.y, S.pos.z))
+  else
+    trace("up BLOCKED: " .. tostring(err))
+  end
   return ok, err
 end
 
 local function goDown()
   local ok, err = turtle.down()
-  if ok then S.pos.y = S.pos.y - 1; saveJournal() end
+  if ok then
+    S.pos.y = S.pos.y - 1; saveJournal()
+    trace(("down -> %d,%d,%d"):format(S.pos.x, S.pos.y, S.pos.z))
+  else
+    trace("down BLOCKED: " .. tostring(err))
+  end
   return ok, err
 end
 
@@ -959,10 +1012,13 @@ local function restock(slot, spec, minCount, batch)
     if want >= minCount then
       filter.count = want
       local n = bridge.exportItem(filter, cfg.base.export_side or cfg.base.suck)
+      trace(("export %s x%d via %s -> %s"):format(target, want,
+        tostring(cfg.base.export_side or cfg.base.suck), tostring(n)))
       if n and n > 0 then collectExport(slot, target) end
     end
   end
   local got = slotCount()
+  trace(("restock %s (want>=%d) -> have %d"):format(target, minCount, got))
   -- faceTo(savedHeading) journals the heading restoration from wherever the
   -- face-the-bridge turns left me (both branches updated S.heading), so a kill
   -- anywhere in here leaves the journal heading == the physical turtle.
@@ -1196,11 +1252,16 @@ local function buildCell(Y0, dx, dy, dz, cell)
   -- the obstruction-free approach into the layer is done by buildLayer
   if not navTo(ax, ay + 1, az) then return false, "nav" end -- stance ABOVE target
   saveBak() -- snapshot the backup at each cell stance (bounds torn-write staleness)
-  if cell.kind == "soil" then return doSoil(cell.tier)
-  elseif cell.kind == "crop" then return doCrop(cell.id)
-  elseif cell.kind == "water" then return doWater()
-  elseif cell.kind == "block" then return doBlock(cell.id) end
-  return true
+  trace(("cell %d,%d,%d kind=%s id=%s tier=%s"):format(dx, dy, dz, cell.kind,
+    tostring(cell.id), tostring(cell.tier)))
+  local ok, why
+  if cell.kind == "soil" then ok, why = doSoil(cell.tier)
+  elseif cell.kind == "crop" then ok, why = doCrop(cell.id)
+  elseif cell.kind == "water" then ok, why = doWater()
+  elseif cell.kind == "block" then ok, why = doBlock(cell.id)
+  else ok = true end
+  trace(("  -> %s%s"):format(ok and "ok" or "FAIL", why and (" " .. why) or ""))
+  return ok, why
 end
 
 -- One layer, serpentine; water cells are built LAST so the ring soil is in
@@ -1835,6 +1896,42 @@ if cmd == nil and not explicitGo then
   end
 end
 
+-- `farm log`: the persistent debug log (everything the turtle printed, capped).
+-- No arg shows its size + tail + how to share it; `on`/`off` toggle the verbose
+-- step trace; `clear` wipes it. The display uses the raw print so that reading
+-- the log doesn't append to it.
+if cmd == "log" then
+  local sub = args[2]
+  if sub == "on" then
+    writeFile(VERBOSE_FLAG, "on\n")
+    print("farm: verbose logging ON - every move/build/AE step traces to " .. LOG_PATH .. ".")
+    return
+  elseif sub == "off" then
+    if fs.exists(VERBOSE_FLAG) then fs.delete(VERBOSE_FLAG) end
+    print("farm: verbose logging OFF (prints are still mirrored to " .. LOG_PATH .. ").")
+    return
+  elseif sub == "clear" then
+    print("farm: log cleared.")
+    fs.delete(LOG_PATH) -- wipes the line just mirrored too: a truly fresh log
+    return
+  end
+  local size = (fs.exists(LOG_PATH) and fs.getSize) and fs.getSize(LOG_PATH) or 0
+  _print(("farm log: %s  (%d bytes, verbose=%s)"):format(
+    LOG_PATH, size, VERBOSE and "ON" or "off"))
+  if fs.exists(LOG_PATH) then
+    local f = fs.open(LOG_PATH, "r"); local all = f.readAll(); f.close()
+    local lines = {}
+    for ln in (all .. "\n"):gmatch("([^\n]*)\n") do
+      if ln ~= "" then lines[#lines + 1] = ln end
+    end
+    _print("  --- last lines ---")
+    for i = math.max(1, #lines - 12), #lines do _print("  " .. lines[i]) end
+  end
+  _print("  share it with me:  pastebin put " .. LOG_PATH)
+  _print("  'farm log on|off' toggles the step trace; 'farm log clear' wipes it.")
+  return
+end
+
 -- `farm find`: a no-config dry run of the autonomous plot-find, so the operator
 -- can confirm the turtle sees their plot before committing to a build.
 -- `farm ae`: prove the AE link. Reports the bridge connection/energy, how many
@@ -2055,5 +2152,6 @@ else
   print("farm: unknown command '" .. tostring(cmd) .. "'")
   print("usage: farm [setup|build|capture|selftest|ae|find|reset]")
   print("       farm hold | go | release   (park before it auto-builds)")
+  print("       farm log [on|off|clear]    (debug log -> pastebin put farm.log)")
   return
 end
