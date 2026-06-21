@@ -14,56 +14,47 @@ behavior relied on here is cited in the research; nothing was assumed.
 
 ---
 
-## 1. What the operator does (the whole list)
+## 1. What the operator does (the whole list — place-and-go)
 
-1. **Point it at one reference plot.** In `farm.conf`, set `origin` to the plot's
-   minimum corner (the soil layer Y), `size = { w, h, d }` (footprint w×d, h
-   layers tall including the crop layer), and the `heading`/`lateral` axes.
-2. **Point it at a build location.** Set `build = { x, y, z }` (the stack's
-   minimum corner) and `plots` (how many to stack).
-3. **Point it at AE.** Set `base = { bridge, park, staging, suck, export_side }`
-   — the ME Bridge peripheral name, the restock park (clear air above the
-   stack), the staging cell the bridge exports into, and the suck direction.
-4. **Place the turtle** at `start` facing `start_heading`, install, run.
+1. **Drop a turtle** (Advanced, with a **Geo Scanner** upgrade so it can find the
+   plot; no other tool needed) somewhere near your existing sulfur plot.
+2. **Slap an ME Bridge** next to it (or on its wired network), connected to the
+   AE network that reaches the mining dim.
+3. **Run the installer** and `farm`. On first run it auto-discovers everything,
+   tells you what it found, and starts building. It may ask the copy count.
 
-There is **one mandatory server-side setting** the turtle cannot do for you,
-already flagged in Phase 1: **`force_load_mode: always`** in FTB-Chunks (so the
-farm ticks while you are logged out). Everything else the turtle owns.
+That's it — no coordinates, no config file, no in-game Lua. On first run the
+turtle:
+- **finds the plot itself** by scanning (`peripheral.find` a Geo Scanner → scan a
+  radius → keep the plot-signature blocks → bounding box),
+- **works out its own world heading with no GPS** (steps one block, watches the
+  scanned plot's offset shift),
+- **discovers the ME Bridge** (`peripheral.find`),
+- **writes its own `farm.conf`** in a turtle-relative frame (the drop point is
+  the origin), so reboots resume,
+- **scans your plot and stacks the copies above it.**
 
-A worked `farm.conf`:
+Your AE network just needs the materials in stock or craftable: dirt, a diamond
+hoe, `farmingforblockheads:red_fertilizer`, `mysticalagriculture:sulfur_seeds`,
+water buckets, coal blocks. The **one server-side setting** the turtle can't do
+(Phase 1): **`force_load_mode: always`** in FTB-Chunks, only if you want it to
+run while you're logged out.
 
-```lua
-return {
-  start  = { x = 100, y = 80, z = 100 }, start_heading = "east",
-  origin = { x = 50,  y = 64, z = 50 },  size = { w = 9, h = 2, d = 9 },
-  heading = "east", lateral = "south", scan_y = 67,
-  build  = { x = 50, y = 100, z = 50 },  plots = 8,
-  travel_y = 124,            -- ceiling for restock travel (above the stack)
-  base = {
-    bridge = "right",                       -- ME Bridge peripheral / side
-    park    = { x = 50, y = 124, z = 48 },  -- restock park (clear air)
-    -- the turtle sucks from `park` in the `suck` direction, so the staging
-    -- chest MUST sit exactly one block that way (here: one block DOWN from
-    -- park). `staging` is documentation of that cell; the code derives the
-    -- suck target from park + suck, so keep them consistent.
-    staging = { x = 50, y = 123, z = 48 },
-    suck = "down", export_side = "up",
-    scratch = { x = 47, y = 122, z = 50 },  -- self-test column (needs a floor)
-    test_item = "minecraft:dirt",
-    craft_probe = "farmingforblockheads:red_fertilizer",
-  },
-  fleet = "farm1",           -- telemetry source name (fluxwall shows it)
-  -- token = "...",          -- optional: override the basectl courtesy token
-}
-```
+> **Power-user fallback.** If you'd rather pin everything by hand (no Geo
+> Scanner, exact build location, separate staging chest), write a `farm.conf`
+> with explicit `origin`/`size`/`build`/`base = { bridge, park, suck,
+> export_side }` coordinates (the drop point is the park) and the wizard is
+> skipped entirely.
 
 ## 2. How to run
 
 ```
-farm capture     scan the reference plot -> farm.blueprint (one time)
-farm build       self-test, then build the stack (resumes if interrupted)
-farm selftest    run the startup self-tests only (not required separately)
-farm             resume from the journal (what startup.lua runs after a reboot)
+farm             first run: auto-setup wizard, then build (startup runs this)
+farm setup [N]   force the auto-setup, stacking N copies (default 8)
+farm find        dry run: scan and report the plot it sees, build nothing
+farm capture     (manual config) scan the reference plot -> farm.blueprint
+farm build       (manual config) self-test, then build the stack
+farm selftest    run the startup self-tests only
 ```
 
 Install through the existing mesh — the role is wired into the deploy manifest:
@@ -162,7 +153,7 @@ The harness (`harness/cc_env.lua`) was extended with turtle item-use semantics
 (hoe/fertilizer/seed/water bucket, all source-verified return values + tool
 durability) and the ME-Bridge crafting surface (`getItem`/`getItems`/
 `isCraftable`/`craftItem` async/`exportItem`). `tests/run_farm_tests.lua` is
-**30/30 green** headless, covering: primitive fidelity + negative preconditions;
+**34/34 green** headless, covering: primitive fidelity + negative preconditions;
 capture round-trip + idempotency; single-plot and 2-plot builds; idempotent
 converge; AE supply with on-demand crafting; the self-test gate (pass → builds,
 fail → builds nothing); kill-resume across a 5-point kill sweep (no double-
@@ -171,7 +162,7 @@ pull), a 2-plot mid-ascent kill; and telemetry + basectl. The 97 telemetry and
 60 sled regression tests stay green.
 
 ```
-toolchain/lua-5.2.4/src/lua tests/run_farm_tests.lua    # 30
+toolchain/lua-5.2.4/src/lua tests/run_farm_tests.lua    # 34
 toolchain/lua-5.2.4/src/lua tests/run_tests.lua         # 97 (regression)
 toolchain/lua-5.2.4/src/lua tests/run_sled_tests.lua    # 60 (regression)
 ```
