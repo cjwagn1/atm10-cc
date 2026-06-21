@@ -2245,6 +2245,30 @@ if cmd == "diag" then
     return false, "craft STALLED (no free CPU / missing ingredient)"
   end)
 
+  -- STAGE EVERY TEST ITEM WHILE DOCKED. The ME Bridge is a FIXED block at the dock
+  -- (in-game) / blockAt in the harness: it is reachable ONLY while the turtle sits
+  -- at the dock. The moment diag RISES into clear air to test the build primitives,
+  -- the bridge is gone, so a pull AFTER the rise fails (the operator's in-game
+  -- SIDE-TILL/FERTILIZE/PLANT/WATER halt). So pull/collect every item the primitive
+  -- tests consume INTO its work slot now, while the bridge is still reachable, and
+  -- report an "AE PULL: <item>" PASS/FAIL per item (a genuinely missing AE item is
+  -- still visible). The rise-and-test steps below NEVER pull; they consume what was
+  -- staged here. Dirt needs 2 (the PLACE DIRT cell + the WATER brace).
+  local seedId = "mysticalagriculture:sulfur_seeds"
+  local function stage(item, slot, name, count)
+    step("AE PULL: " .. item, function()
+      local ok = pullItem(slot, name, count or 1)
+      return ok, ok and ("staged " .. name) or ("no " .. name .. " from AE")
+    end)
+  end
+  stage("dirt", cfg.slots.dirt, cfg.items.dirt, 2)
+  -- the hoe was crafted above; export+collect it into the hoe slot now (a craft
+  -- only puts it in AE - it still has to land in the turtle's fixed hoe slot)
+  stage("hoe", cfg.slots.hoe, cfg.items.hoe, 1)
+  stage("fertilizer", cfg.slots.fertilizer, cfg.items.fertilizer, 1)
+  stage("seed", cfg.slots.seed, seedId, 1)
+  stage("water", cfg.slots.water, cfg.items.water, 1)
+
   -- RISE into clear air above the dock: probe up until detectUp() is false AND the
   -- four horizontal neighbours at the stance cell are clear, so the build
   -- primitives are tested where they are SUPPOSED to work (open air) - isolating a
@@ -2289,30 +2313,31 @@ if cmd == "diag" then
     local soilY = Ys - 1       -- dirt/farmland/fertilized + crop one above (at Ys)
     local function noteAbs(x, y, z) placed[#placed + 1] = { x = x, y = y, z = z } end
 
-    -- PLACE DIRT below the stance and read it back
+    -- PLACE DIRT below the stance and read it back (consumes the staged dirt - the
+    -- bridge is now out of reach, so NO pull here)
     step("PLACE DIRT", function()
-      if not pullItem(cfg.slots.dirt, cfg.items.dirt, 1) then
-        return false, "no dirt from AE"
-      end
       turtle.select(cfg.slots.dirt)
+      if turtle.getItemCount(cfg.slots.dirt) < 1 then return false, "no dirt staged" end
       if not turtle.placeDown() then return false, "placeDown refused" end
       noteAbs(sx, soilY, sz)
       local h, i = turtle.inspectDown()
       return h and i.name == cfg.items.dirt, "placed " .. tostring(h and i.name)
     end)
 
-    -- SIDE-TILL the dirt -> farmland (the key proof: works in clear air)
+    -- SIDE-TILL the dirt -> farmland (the key proof: works in clear air). The hoe
+    -- was staged into cfg.slots.hoe while docked; tillBelowFromSide selects that
+    -- slot. NO pull here - the bridge is out of reach after the rise.
     step("SIDE-TILL", function()
-      pullItem(cfg.slots.hoe, cfg.items.hoe, 1)
+      if turtle.getItemCount(cfg.slots.hoe) < 1 then return false, "no hoe staged" end
       tillBelowFromSide()
       local h, i = turtle.inspectDown()
       return h and i.name == "minecraft:farmland", "below is " .. tostring(h and i.name)
     end)
 
-    -- FERTILIZE -> fertilized_farmland_healthy
+    -- FERTILIZE -> fertilized_farmland_healthy (consumes the staged fertilizer)
     step("FERTILIZE", function()
-      if not pullItem(cfg.slots.fertilizer, cfg.items.fertilizer, 1) then
-        return false, "no fertilizer from AE"
+      if turtle.getItemCount(cfg.slots.fertilizer) < 1 then
+        return false, "no fertilizer staged"
       end
       turtle.select(cfg.slots.fertilizer); turtle.placeDown()
       local h, i = turtle.inspectDown()
@@ -2323,10 +2348,9 @@ if cmd == "diag" then
     -- soilY; rise to Ys+1 and placeDown the seed onto the farmland below. The
     -- turtle STAYS at Ys+1 afterwards (descending would re-enter the crop cell);
     -- every later step navigates by explicit coords, so the stance doesn't matter.
-    local seedId = "mysticalagriculture:sulfur_seeds"
     step("PLANT", function()
       if not navTo(sx, Ys + 1, sz) then return false, "couldn't rise to plant" end
-      if not pullItem(cfg.slots.seed, seedId, 1) then return false, "no seed from AE" end
+      if turtle.getItemCount(cfg.slots.seed) < 1 then return false, "no seed staged" end
       turtle.select(cfg.slots.seed); turtle.placeDown()
       local h, i = turtle.inspectDown()
       local planted = h and i.name and i.name:find("crop", 1, true) ~= nil
@@ -2343,8 +2367,8 @@ if cmd == "diag" then
       -- lay the brace at (wx, soilY-1) from the cell directly above it
       if not toCell(wx, soilY, wz) then return false, "no clear water column" end
       if not turtle.detectDown() then
-        if not pullItem(cfg.slots.dirt, cfg.items.dirt, 1) then
-          return false, "no dirt for the brace"
+        if turtle.getItemCount(cfg.slots.dirt) < 1 then
+          return false, "no dirt staged for the brace"
         end
         turtle.select(cfg.slots.dirt); turtle.placeDown()
       end
@@ -2352,8 +2376,8 @@ if cmd == "diag" then
       noteAbs(wx, soilY - 1, wz)
       -- rise one and place the water source at (wx, soilY) onto the brace below
       if not goUp() then return false, "couldn't rise over the brace" end
-      if not pullItem(cfg.slots.water, cfg.items.water, 1) then
-        return false, "no water bucket from AE"
+      if turtle.getItemCount(cfg.slots.water) < 1 then
+        return false, "no water bucket staged"
       end
       turtle.select(cfg.slots.water)
       if not turtle.placeDown() then return false, "bucket placeDown refused" end
@@ -2387,13 +2411,23 @@ if cmd == "diag" then
   navTo(0, 0, 0); faceTo("north") -- return to the dock
   mark("CLEAN UP", cleaned, cleaned and "removed every test block" or "left a block")
 
-  -- summary block + one-line verdict
+  -- Summary block + one-line verdict. The per-item "AE PULL: <item>" rows are rolled
+  -- up into ONE line here so the whole block + header + verdict survive the 19-row CC
+  -- terminal (the operator's at-a-glance view); the full per-item PASS/FAIL detail is
+  -- in the live narrative above and in farm.log. The roll-up still names the first
+  -- failed item, so a genuinely missing AE item stays visible at a glance.
   print("farm diag: ---- capability summary ----")
-  local allPass = true
+  local allPass, pullAllPass, pullBad = true, true, nil
   for _, r in ipairs(results) do
     if not r.ok then allPass = false end
-    print(("  %-18s %s"):format(r.name, r.ok and "PASS" or "FAIL"))
+    if r.name:find("^AE PULL: ") then
+      if not r.ok then pullAllPass = false; pullBad = pullBad or r.name end
+    else
+      print(("  %-18s %s"):format(r.name, r.ok and "PASS" or "FAIL"))
+    end
   end
+  print(("  %-18s %s"):format("AE PULL",
+    pullAllPass and "PASS" or ("FAIL (" .. tostring(pullBad) .. ")")))
   if allPass then
     print("farm diag: VERDICT - all capabilities PASS. A build halt is geometry,")
     print("  not capability (run with the default clearance to clear the canopy).")

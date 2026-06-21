@@ -1134,13 +1134,18 @@ T("diag: capability self-test reports every capability PASS and leaves no mess",
     build = { x = 0, y = 0, z = 0 }, plots = 1, fleet = "farm1",
   }]]
   -- a full AE: dirt STOCKED, hoe CRAFTABLE (build needs to craft one), seed/fert/
-  -- water stocked. On-turtle bridge feeding straight into the turtle.
+  -- water stocked. The bridge is a fixed BLOCK just NORTH of the dock (blockAt):
+  -- readable ONLY while the turtle is physically at the dock facing north - the
+  -- moment diag RISES away, the bridge is unreachable (models the in-game frame).
+  -- So any pull AFTER the rise must fail: diag has to stage every item WHILE
+  -- DOCKED. This position-gated bridge reproduces the operator's in-game halt.
   local dirt = { id = "minecraft:dirt", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0; hoe.isCraftable = true
   local fert = env:fertilizerItem{ count = 64 }
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 64 })
   local water = env:waterBucketItem(); water.count = 16
-  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
+    blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6,
     usage = 5, craftSeconds = 1, items = { dirt, hoe, fert, seed, water } })
   current = env
   local res = env:run(FARM, { "diag" }, { maxTime = 4000 })
