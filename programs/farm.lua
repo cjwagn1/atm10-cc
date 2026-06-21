@@ -356,6 +356,79 @@ local function calibrateHeading()
   return headingFromDelta(p0.rx - p1.rx, p0.rz - p1.rz)
 end
 
+-- ----------------------------------------------------- scanner-less search
+-- With NO Geo Scanner the turtle can still find the plot on foot: set it ON TOP
+-- of the farm (one block above the crops) and it flies an expanding spiral at
+-- that altitude, inspecting DOWN, until it sees the plot signature - all in a
+-- turtle-LOCAL frame (drop = origin, the initial facing simply LABELLED "north";
+-- no GPS, no heading calibration, because we never compare against world-aligned
+-- scanner data). It returns to the drop point + initial facing. Be blunt about
+-- the limits: it only sees the block directly below it, so the plot must sit at
+-- the drop altitude minus one and within `radius` horizontally; a Geo Scanner
+-- removes both constraints and finds the plot from anywhere nearby.
+
+-- Burn any fuel the operator left in my inventory so I can move enough to search
+-- and calibrate before the AE fuel path exists (the build later tops up from
+-- coal in AE). No-op with unlimited fuel or no burnable items.
+local function refuelFromInventory(target)
+  if not turtle.getFuelLevel or turtle.getFuelLevel() == "unlimited" then return end
+  for s = 1, 16 do
+    if turtle.getFuelLevel() >= target then break end
+    turtle.select(s)
+    if turtle.refuel(0) then turtle.refuel() end
+  end
+end
+
+-- expanding-ring (centre-out) offsets within Chebyshev `radius`, so the search
+-- can stop one clear ring past the plot instead of flying the whole box
+local function spiralCells(radius)
+  local cells = { { 0, 0 } }
+  for r = 1, radius do
+    local x, z = -r, -r
+    for _, step in ipairs({ { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 } }) do
+      for _ = 1, 2 * r do
+        cells[#cells + 1] = { x, z }
+        x, z = x + step[1], z + step[2]
+      end
+    end
+  end
+  return cells
+end
+
+local function searchPlot(radius)
+  radius = radius or 8
+  -- dead-reckon in a LOCAL frame; the real facing is whatever it is, we just
+  -- call it "north" and stay self-consistent (the build copies in the same frame)
+  S = { pos = { x = 0, y = 0, z = 0 }, heading = "north" }
+  local hits, found, maxR = {}, false, 0
+  for _, c in ipairs(spiralCells(radius)) do
+    local dx, dz = c[1], c[2]
+    local cheb = math.max(math.abs(dx), math.abs(dz))
+    if found and cheb > maxR + 1 then break end -- one clear ring past the plot
+    if navTo(dx, 0, dz) then
+      local has, info = turtle.inspectDown()
+      if has and isPlotBlock(info.name) then
+        hits[#hits + 1] = { x = dx, z = dz }
+        found = true
+        if cheb > maxR then maxR = cheb end
+      end
+    end
+  end
+  navTo(0, 0, 0)
+  faceTo("north")
+  if not found then return nil, "no plot found on foot within reach" end
+  local minx, maxx, minz, maxz
+  for _, h in ipairs(hits) do
+    minx = math.min(minx or h.x, h.x); maxx = math.max(maxx or h.x, h.x)
+    minz = math.min(minz or h.z, h.z); maxz = math.max(maxz or h.z, h.z)
+  end
+  -- inspectDown sees the CROP layer (one below the flight altitude); the soil
+  -- layer is inferred one below it (a sulfur crop only grows on farmland), so
+  -- the plot is 2 tall, exactly as capture infers it. crop layer = -1 local.
+  return { rx = minx, ry = -2, rz = minz,
+    w = maxx - minx + 1, h = 2, d = maxz - minz + 1, blocks = #hits }, "north"
+end
+
 -- ----------------------------------------------------------- serialize
 
 -- Deterministic blueprint serializer (sorted keys) so a re-capture of the same
@@ -1079,19 +1152,34 @@ end
 
 local function runWizard(plotCount)
   print("farm: first run - setting myself up.")
-  print("farm: looking for your sulfur plot...")
-  local p, why = findPlot()
-  if not p then
-    print("farm: couldn't find a plot (" .. tostring(why) .. ").")
-    print("  Equip a Geo Scanner and set me down near the farm, then reboot.")
-    return false
+  refuelFromInventory(2000) -- burn any starting coal so I can move to look around
+  local p, heading
+  if findScanner() then
+    print("farm: looking for your sulfur plot...")
+    local why
+    p, why = findPlot()
+    if not p then
+      print("farm: couldn't find a plot (" .. tostring(why) .. ").")
+      print("  Set me down near the farm, then reboot.")
+      return false
+    end
+    heading, why = calibrateHeading()
+    if not heading then
+      print("farm: couldn't work out my facing (" .. tostring(why) .. ").")
+      return false
+    end
+  else
+    -- no scanner: walk a bounded spiral and inspect down (Task #18)
+    print("farm: no Geo Scanner - searching for the plot on foot...")
+    local hp, herr = searchPlot()
+    if not hp then
+      print("farm: couldn't find a plot on foot (" .. tostring(herr) .. ").")
+      print("  Set me ON TOP of the farm, or equip a Geo Scanner, then reboot.")
+      return false
+    end
+    p, heading = hp, "north"
   end
   print(("farm: found a %dx%d plot (h=%d)."):format(p.w, p.d, p.h))
-  local heading, herr = calibrateHeading()
-  if not heading then
-    print("farm: couldn't work out my facing (" .. tostring(herr) .. ").")
-    return false
-  end
   print("farm: I'm facing " .. heading .. ".")
   local bridge0, bridgeName = findBridge()
   if not bridge0 then

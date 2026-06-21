@@ -605,6 +605,40 @@ T("find: reports nothing-found with no Geo Scanner and no plot", function()
   expectContains(env:termText(), "no sulfur plot", "clear not-found message")
 end)
 
+-- Task #18: NO Geo Scanner at all. Set the turtle on top of the farm (one block
+-- above the crops) and it finds the plot by flying a bounded spiral, inspecting
+-- down, in a turtle-local frame - then builds a copy directly above. The floor
+-- is truly just an advanced turtle (a scanner only makes the find robust at any
+-- nearby position).
+T("setup wizard (no scanner): finds the plot on foot and builds a copy", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 66, z = 0 },
+    facing = "east", fuel = 90000 } }
+  -- NO geo scanner. Plot crops at y65 (one below the drop), close enough to spiral
+  seedRefPlot(env, 1, 64, 0, 3, 3)
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  local water = env:waterBucketItem(); water.count = 16
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    exportCell = { x = 0, y = 65, z = 0 }, -- chest directly below the drop (suck down)
+    items = { dirt, hoe, fert, seed, water, coal } })
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 120000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "found a 3x3 plot", "found the plot on foot")
+  expectContains(env:termText(), "no Geo Scanner", "told the operator it searched on foot")
+  -- copy soil one plot-height above the original (soil y64, h2 -> copy soil y66);
+  -- footprint ox=1,oz=0 mirrors the seeded plot at (1,64,0)
+  eq(countLayer(env, 66, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 1, 0), 8, "copy soil ring built above the plot")
+  eq(countLayer(env, 67, "mysticalagriculture:sulfur_crop", 3, 3, 1, 0), 8,
+    "copy crops")
+  eq(env:block(2, 66, 1) and env:block(2, 66, 1).id, "minecraft:water",
+    "copy center water")
+end)
+
 -- ------------------------------------------- 3. farm.lua: capture (Q3)
 -- Inspect-traversal of a reference plot -> normalized blueprint. Fertilized
 -- farmland becomes a soil recipe (build = dirt + till + fertilize), never a
