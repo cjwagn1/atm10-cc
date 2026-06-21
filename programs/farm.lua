@@ -565,11 +565,51 @@ local function loadBlueprint()
 end
 
 -- ------------------------------------------------------------- capture
--- Column-probe inspect-traversal (Q3): fly a serpentine over the footprint at
--- scan_y (clear air above the plot); per column, descend through air calling
--- inspectDown, recording the first solid block. A crop implies fertilized
--- farmland directly beneath it (a sulfur crop only exists on farmland), so the
--- soil cell under each crop is inferred rather than dug to. Pure reads.
+-- Two strategies. With a Geo Scanner the turtle reads the WHOLE 3D structure in
+-- one scan (every layer, including soil + crops UNDER an accelerator / cable /
+-- chest canopy) - the only way to copy a real farm where the top surface is
+-- infrastructure. Without a scanner it falls back to the top-down column probe
+-- (sees only each column's top block + infers soil under a crop).
+
+local function writeBlueprint(cells, w, h, d)
+  local n = 0
+  for _ in pairs(cells) do n = n + 1 end
+  writeFile(BLUEPRINT, serializeBlueprint{ size = { w = w, h = h, d = d },
+    cells = cells })
+  print(("farm: captured %d cells (%dx%d, h=%d) -> %s")
+    :format(n, w, d, h, BLUEPRINT))
+  return true
+end
+
+-- Full-3D capture: hover above the plot CENTRE so one free scan (radius 8 reaches
+-- +-8 = up to a 17-wide footprint) covers everything, then map each scanned
+-- block offset to a plot cell (ix,dy,iz) and classify it. Sees every layer.
+local function captureScan3D()
+  local w, h, d = cfg.size.w, cfg.size.h, cfg.size.d
+  local cx = cfg.origin.x + math.floor(w / 2)
+  local cz = cfg.origin.z + math.floor(d / 2)
+  if not navTo(cx, cfg.scan_y, cz) then
+    print("farm: capture couldn't reach the plot centre.")
+    return false
+  end
+  local blocks, err = scanBlocks(8)
+  if not blocks then
+    print("farm: capture scan failed (" .. tostring(err) .. ").")
+    return false
+  end
+  -- scanner offsets are relative to my cell (cx, scan_y, cz) in the build frame
+  local cells = {}
+  for _, b in ipairs(blocks) do
+    local ix = cx + b.x - cfg.origin.x
+    local dy = (cfg.scan_y + b.y) - cfg.origin.y
+    local iz = cz + b.z - cfg.origin.z
+    if ix >= 0 and ix < w and dy >= 0 and dy < h and iz >= 0 and iz < d then
+      cells[key(ix, dy, iz)] = classify(b.name, b.state)
+    end
+  end
+  navTo(cfg.origin.x, cfg.scan_y, cfg.origin.z)
+  return writeBlueprint(cells, w, h, d)
+end
 
 local function probeColumn(ix, iz, cells)
   local y = cfg.scan_y
@@ -589,7 +629,7 @@ local function probeColumn(ix, iz, cells)
   end
 end
 
-local function capture()
+local function captureProbe()
   local w, h, d = cfg.size.w, cfg.size.h, cfg.size.d
   local cells = {}
   for iz = 0, d - 1 do
@@ -608,13 +648,12 @@ local function capture()
     end
   end
   navTo(cfg.origin.x, cfg.scan_y, cfg.origin.z) -- park back at the scan origin
-  local n = 0
-  for _ in pairs(cells) do n = n + 1 end
-  writeFile(BLUEPRINT, serializeBlueprint{ size = { w = w, h = h, d = d },
-    cells = cells })
-  print(("farm: captured %d cells (%dx%d, h=%d) -> %s")
-    :format(n, w, d, h, BLUEPRINT))
-  return true
+  return writeBlueprint(cells, w, h, d)
+end
+
+local function capture()
+  if findScanner() then return captureScan3D() end
+  return captureProbe()
 end
 
 -- --------------------------------------------------------------- supply
@@ -711,22 +750,39 @@ local function restock(slot, spec, minCount, batch)
     local d = turtle.getItemDetail(slot)
     return (d and d.name == spec.name) and turtle.getItemCount(slot) or 0
   end
-  local function aeCount()
+  -- Resolve the stocked count + the export filter for spec.name. A {name=}
+  -- lookup finds normal items; an NBT-keyed block (a frequency-coded ender chest)
+  -- is missed by name, so fall back to the full list and pull by FINGERPRINT (the
+  -- operator re-keys the chest after). Returns count, exportFilter.
+  local function resolveStock()
     local it = bridge.getItem({ name = spec.name })
-    return it and it.count or 0
+    if it and (it.count or 0) > 0 then return it.count, { name = spec.name } end
+    local items = bridge.getItems()
+    if type(items) == "table" then
+      for _, e in ipairs(items) do
+        if e.name == spec.name and (e.count or 0) > 0 then
+          return e.count, { fingerprint = e.fingerprint or e.name }
+        end
+      end
+    end
+    return 0, { name = spec.name }
   end
   if slotCount() < minCount then
+    local count, filter = resolveStock()
     -- craft only if observed AE stock can't cover the request and a pattern
     -- exists; never re-issue on a job id (idempotent on observed stock)
-    if aeCount() < minCount and bridge.isCraftable({ name = spec.name }) then
+    if count < minCount and bridge.isCraftable({ name = spec.name }) then
       bridge.craftItem({ name = spec.name, count = batch })
       local deadline = os.clock() + cfg.craft_timeout
-      while aeCount() < minCount and os.clock() < deadline do os.sleep(0.5) end
+      while select(1, resolveStock()) < minCount and os.clock() < deadline do
+        os.sleep(0.5)
+      end
+      count, filter = resolveStock()
     end
-    local want = math.min(batch, aeCount())
+    local want = math.min(batch, count)
     if want >= minCount then
-      local n = bridge.exportItem({ name = spec.name, count = want },
-        cfg.base.export_side or cfg.base.suck)
+      filter.count = want
+      local n = bridge.exportItem(filter, cfg.base.export_side or cfg.base.suck)
       if n and n > 0 then collectExport(slot, spec.name) end
     end
   end

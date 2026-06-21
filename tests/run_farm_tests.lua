@@ -870,6 +870,31 @@ T("capture: scans a 3x3 plot into a normalized blueprint", function()
   eq(bp.cells["1,1,1"], nil, "center crop level is air (omitted)")
 end)
 
+-- With a Geo Scanner the capture reads the WHOLE 3D structure, so soil + crops
+-- UNDER an accelerator/cable/chest canopy are recorded - not just the top block.
+-- This is the fix for a real farm whose top surface is all infrastructure (a
+-- top-down probe captured only the canopy and the build then placed nothing).
+T("capture: 3D scan records layers under a top canopy (not just the top)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 68, z = 0 },
+    facing = "east", fuel = 5000 } }
+  env:addGeoScanner("scanner")
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 1, h = 3, d = 1 },
+    heading = "east", scan_y = 68, fleet = "farm1",
+  }]]
+  env:setBlock(0, 64, 0, { id = "farmingforblockheads:fertilized_farmland_healthy" })
+  env:setBlock(0, 65, 0, { id = "mysticalagriculture:sulfur_crop" })
+  env:setBlock(0, 66, 0, { id = "ae2:growth_accelerator" }) -- the canopy on top
+  current = env
+  local res = env:run(FARM, { "capture" }, { maxTime = 600 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  local bp = loadTable(env:file("farm.blueprint"), "blueprint")
+  eq(bp.cells["0,0,0"].kind, "soil", "soil captured under the canopy")
+  eq(bp.cells["0,1,0"].kind, "crop", "crop captured under the canopy")
+  eq(bp.cells["0,2,0"].kind, "block", "the canopy block itself captured")
+  eq(bp.cells["0,2,0"].id, "ae2:growth_accelerator", "canopy id kept")
+end)
+
 T("capture: re-running is idempotent (same blueprint)", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 66, z = 0 },
     facing = "east", fuel = 9000 } }
@@ -998,6 +1023,43 @@ local BP_WITH_INFRA = [[return {
   },
 }
 ]]
+
+-- The operator's ender chest IS in AE, but frequency-keyed (NBT), so a plain
+-- {name=} lookup misses it. The build must pull it by fingerprint and place it
+-- (the operator re-keys it after) - "replicate everything".
+T("build: pulls an NBT-keyed block (frequency ender chest) by fingerprint", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 80000 } }
+  env.files["farm.blueprint"] = [[return {
+    size = { w = 2, h = 1, d = 1 },
+    cells = {
+      ["0,0,0"] = { kind = "soil", tier = "plain" },
+      ["1,0,0"] = { kind = "block", id = "enderstorage:ender_chest" },
+    },
+  }
+  ]]
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 2, h = 1, d = 1 },
+    heading = "east", scan_y = 66,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
+      staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
+  }]]
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  -- in AE but ONLY matchable by fingerprint (frequency NBT), not by name
+  local chest = { id = "enderstorage:ender_chest", count = 8,
+    fingerprint = "ender_chest:white/white/white", nbtKeyed = true }
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0,
+    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt, chest } })
+  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 8000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "skipping", "did not skip - pulled it by fingerprint")
+  eq(env:block(1, 100, 0) and env:block(1, 100, 0).id, "enderstorage:ender_chest",
+    "the frequency ender chest was placed")
+end)
 
 T("build: an un-obtainable infrastructure block is skipped, not a fatal halt", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },

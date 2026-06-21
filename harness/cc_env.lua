@@ -546,11 +546,17 @@ function Env:addMeBridge(name, o)
   -- "ae_crafting"); exportItem moves stock to env.ground at o.exportCell so
   -- turtle.suck() collects it. All machine-sourced (no fake-player path).
   local items = o.items or {}
+  -- A stack with nbtKeyed=true models a frequency/NBT-coded item (e.g. an
+  -- EnderStorage ender chest White/White/White): a plain {name=} lookup MISSES
+  -- it (AE keys it by fingerprint), so it is found only by {fingerprint=}. The
+  -- builder must fall back to getItems()+fingerprint to pull such a block.
   local function findItem(filter)
-    local want = type(filter) == "table"
-      and (filter.name or filter.fingerprint) or filter
+    local byName, byFp
+    if type(filter) == "table" then byName, byFp = filter.name, filter.fingerprint
+    else byName = filter end
     for _, s in ipairs(items) do
-      if s.id == want then return s end
+      if byFp and (s.fingerprint or s.id) == byFp then return s end
+      if byName and s.id == byName and not s.nbtKeyed then return s end
     end
     return nil
   end
