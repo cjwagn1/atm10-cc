@@ -318,6 +318,32 @@ local function findPlot(radius)
     w = maxx - minx + 1, h = maxy - miny + 1, d = maxz - minz + 1, blocks = n }
 end
 
+-- Deduce the turtle's real WORLD facing with no GPS/compass: the Geo Scanner
+-- reports world-aligned offsets, so when the turtle steps one block forward, a
+-- fixed reference (the plot) shifts in offset by exactly -forward. Reading that
+-- shift gives the world direction "forward" points. The turtle ends facing the
+-- direction it measured (any turns taken to find a clear step are kept).
+local function headingFromDelta(dx, dz)
+  if dx == 1 and dz == 0 then return "east" end
+  if dx == -1 and dz == 0 then return "west" end
+  if dx == 0 and dz == 1 then return "south" end
+  if dx == 0 and dz == -1 then return "north" end
+  return nil
+end
+
+local function calibrateHeading()
+  local p0 = findPlot()
+  if not p0 then return nil, "no reference to calibrate on" end
+  local turns = 0
+  while turtle.detect() and turns < 4 do turtle.turnRight(); turns = turns + 1 end
+  if turtle.detect() then return nil, "boxed in - cannot calibrate heading" end
+  if not turtle.forward() then return nil, "blocked stepping to calibrate" end
+  local p1 = findPlot()
+  turtle.back()
+  if not p1 then return nil, "lost the plot mid-calibration" end
+  return headingFromDelta(p0.rx - p1.rx, p0.rz - p1.rz)
+end
+
 -- ----------------------------------------------------------- serialize
 
 -- Deterministic blueprint serializer (sorted keys) so a re-capture of the same
@@ -422,12 +448,12 @@ local bridge          -- wrapped ME Bridge peripheral, or nil
 local broadcast       -- forward decl (telemetry; defined in orchestration)
 
 local function findBridge()
-  if cfg.base and cfg.base.bridge and peripheral.isPresent(cfg.base.bridge) then
+  if cfg and cfg.base and cfg.base.bridge and peripheral.isPresent(cfg.base.bridge) then
     return peripheral.wrap(cfg.base.bridge)
   end
   for _, n in ipairs(peripheral.getNames()) do
     if peripheral.hasType and peripheral.hasType(n, "me_bridge") then
-      return peripheral.wrap(n)
+      return peripheral.wrap(n), n
     end
   end
   return nil
@@ -964,6 +990,82 @@ local function serveIdle(finalState)
   end
 end
 
+-- ----------------------------------------------------------- setup wizard
+-- First run with no farm.conf: discover everything and write the config, so the
+-- operator only ever places the turtle + an ME Bridge and runs the installer.
+-- Frame: the turtle's drop point is the origin (0,0,0); the found plot and the
+-- build column are expressed relative to it, so no coordinates are ever typed.
+
+local DEFAULT_PLOTS = 8
+
+local function ptStr(t) return ("{ x = %d, y = %d, z = %d }"):format(t.x, t.y, t.z) end
+
+local function serializeConf(c)
+  local o = { "return {" }
+  o[#o + 1] = ("  start = %s, start_heading = %q,"):format(ptStr(c.start), c.start_heading)
+  o[#o + 1] = ("  origin = %s, size = { w = %d, h = %d, d = %d },")
+    :format(ptStr(c.origin), c.size.w, c.size.h, c.size.d)
+  o[#o + 1] = ("  heading = %q, scan_y = %d,"):format(c.heading, c.scan_y)
+  o[#o + 1] = ("  build = %s, plots = %d, travel_y = %d,")
+    :format(ptStr(c.build), c.plots, c.travel_y)
+  o[#o + 1] = "  base = {"
+  if c.base.bridge then o[#o + 1] = ("    bridge = %q,"):format(c.base.bridge) end
+  o[#o + 1] = ("    park = %s, suck = %q, export_side = %q,")
+    :format(ptStr(c.base.park), c.base.suck, c.base.export_side or c.base.suck)
+  o[#o + 1] = "  },"
+  o[#o + 1] = ("  fleet = %q,"):format(c.fleet or "farm1")
+  o[#o + 1] = "}"
+  return table.concat(o, "\n") .. "\n"
+end
+
+local function runWizard(plotCount)
+  print("farm: first run - setting myself up.")
+  print("farm: looking for your sulfur plot...")
+  local p, why = findPlot()
+  if not p then
+    print("farm: couldn't find a plot (" .. tostring(why) .. ").")
+    print("  Equip a Geo Scanner and set me down near the farm, then reboot.")
+    return false
+  end
+  print(("farm: found a %dx%d plot (h=%d)."):format(p.w, p.d, p.h))
+  local heading, herr = calibrateHeading()
+  if not heading then
+    print("farm: couldn't work out my facing (" .. tostring(herr) .. ").")
+    return false
+  end
+  print("farm: I'm facing " .. heading .. ".")
+  local bridge0, bridgeName = findBridge()
+  if not bridge0 then
+    print("farm: no ME Bridge found - place one touching/wired to me, reboot.")
+    return false
+  end
+  print("farm: ME Bridge found (" .. tostring(bridgeName) .. ").")
+  plotCount = plotCount or DEFAULT_PLOTS
+  -- drop frame: turtle = (0,0,0); the plot + build column hang off it
+  local gen = {
+    start = { x = 0, y = 0, z = 0 }, start_heading = heading, heading = heading,
+    origin = { x = p.rx, y = p.ry, z = p.rz },
+    size = { w = p.w, h = p.h, d = p.d }, scan_y = p.ry + p.h + 1,
+    build = { x = p.rx, y = p.ry + p.h, z = p.rz }, plots = plotCount,
+    travel_y = p.ry + p.h + plotCount * p.h + 4,
+    base = { bridge = bridgeName, park = { x = 0, y = 0, z = 0 },
+      suck = "down", export_side = "up" },
+    fleet = "farm1",
+  }
+  writeFile(CONF_PATH, serializeConf(gen))
+  cfg = loadConf() -- reload through the defaulter (items/cadence/etc.)
+  print(("farm: configured. Stacking %d copies above your plot."):format(plotCount))
+  print("farm: capturing your plot...")
+  S = { pos = { x = 0, y = 0, z = 0 }, heading = heading, phase = "capture" }
+  if not navTo(cfg.origin.x, cfg.scan_y, cfg.origin.z) then
+    print("farm: couldn't reach the plot to scan it (something in the way).")
+    return false
+  end
+  if not capture() then return false end
+  navTo(cfg.start.x, cfg.start.y, cfg.start.z) -- home to the dock for the build
+  return true
+end
+
 -- ---------------------------------------------------------------- main
 
 local args = { ... }
@@ -983,6 +1085,13 @@ if cmd == "find" then
     print("  Equip a Geo Scanner and/or set me down closer to the farm.")
   end
   return
+end
+
+-- First run with no config: discover everything and write farm.conf, then fall
+-- through to the build. After this, a reboot has a config and resumes normally.
+if not cfg and (cmd == nil or cmd == "setup") then
+  if not runWizard(tonumber(args[2])) then return end
+  cmd = nil
 end
 
 local function confError()

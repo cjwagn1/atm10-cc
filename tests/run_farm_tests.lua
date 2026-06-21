@@ -471,6 +471,38 @@ T("find: locates a sulfur plot it was never told about (Geo Scanner)", function(
   expectContains(env:termText(), "found a 3x3 plot", "located the plot by scanning")
 end)
 
+T("setup wizard: no config at all -> finds, calibrates, scans, builds a copy", function()
+  -- the turtle faces WEST (not the default) so a wrong heading calibration would
+  -- mis-place the whole build; only correct discovery lands the copy right.
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "west", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 3, 74, 0, 3, 3) -- the operator's plot: 3 east, 6 below (untold)
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 } -- a bare turtle pulls its hoe from AE
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  local water = env:waterBucketItem(); water.count = 16
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    exportCell = { x = 0, y = 79, z = 0 },
+    items = { dirt, hoe, fert, seed, water, coal } })
+  current = env
+  -- NO farm.conf. Pass the copy count as an arg so the test isn't interactive.
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 40000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "found a 3x3 plot", "auto-found the plot")
+  expectContains(env:termText(), "facing west", "calibrated its real heading")
+  -- the copy lands one plot-height ABOVE the operator's plot: soil at y76
+  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 3, 0), 8, "copy soil ring built above the plot")
+  eq(countLayer(env, 77, "mysticalagriculture:sulfur_crop", 3, 3, 3, 0), 8,
+    "copy crops")
+  eq(env:block(4, 76, 1) and env:block(4, 76, 1).id, "minecraft:water",
+    "copy center water")
+  eq(env:file("farm.conf") ~= nil, true, "wrote its own config for reboots")
+end)
+
 T("find: reports nothing-found with no Geo Scanner and no plot", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 70, z = 0 },
     facing = "north", fuel = 100 } }
