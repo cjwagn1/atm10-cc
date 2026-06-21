@@ -305,10 +305,11 @@ local function findScanner()
   return nil
 end
 
--- The AP Geo Scanner reaches at most 16 blocks (SphereOperation max-cost radius;
--- 8 free). Raw scan with a brief cooldown/charge retry; returns the block list
--- or nil + reason.
-local SCAN_RADIUS = 16
+-- The AP Geo Scanner: radius <= 8 is FREE (0 fuel), radius > 8 costs fuel that
+-- scales with the cube of the radius (a radius-16 scan is ~5274 fuel!). The
+-- wizard scans several times, so a costly radius drains the turtle and then every
+-- scan fails. Default to the free radius; `farm find <r>` can pay for a wider one.
+local SCAN_RADIUS = 8
 
 local function scanBlocks(radius)
   local scanner = findScanner()
@@ -385,7 +386,7 @@ local function printPlotDiagnostic(radius)
       isPlotBlock(nm) and "  <- plot-like" or ""))
   end
   print("farm: I match any *farmland* / *_crop* / *accelerat* / *fertiliz* block.")
-  print("  My scanner only reaches 16 blocks - set me ON or right beside the farm.")
+  print("  My free scan reaches ~8 (16 blocks max, costs fuel) - set me ON the farm.")
 end
 
 -- Deduce the turtle's real WORLD facing with no GPS/compass: the Geo Scanner
@@ -401,17 +402,53 @@ local function headingFromDelta(dx, dz)
   return nil
 end
 
+-- The set of plot-signature block offsets currently in scan range, keyed "x,y,z".
+local function plotOffsetSet(blocks)
+  local set, n = {}, 0
+  for _, b in ipairs(blocks or {}) do
+    if isPlotBlock(b.name) then set[b.x .. "," .. b.y .. "," .. b.z] = true; n = n + 1 end
+  end
+  return set, n
+end
+
+-- After the turtle steps forward by world-vector V, every plot block's offset
+-- becomes (old - V). The cardinal V that maps the most BEFORE offsets onto AFTER
+-- offsets is the step direction = the turtle's facing. Robust to the few blocks
+-- that leave/enter range at the boundary (they only cost a little overlap),
+-- where the old "bbox min shift" silently broke. Returns dir, overlap-score.
+local function bestStepDir(before, after)
+  local best, bestScore
+  for _, d in ipairs({ "north", "south", "east", "west" }) do
+    local v, score = DIRV[d], 0
+    for kpos in pairs(before) do
+      local x, y, z = kpos:match("(-?%d+),(-?%d+),(-?%d+)")
+      if after[(tonumber(x) - v.x) .. "," .. y .. "," .. (tonumber(z) - v.z)] then
+        score = score + 1
+      end
+    end
+    if not bestScore or score > bestScore then bestScore, best = score, d end
+  end
+  return best, bestScore
+end
+
+-- Deduce my world facing with no GPS: scan, step one block, scan again, and read
+-- which way the plot shifted. Try up to 4 facings so a blocked step (e.g. the
+-- bridge in front) or an edge-of-range step just gets retried in another
+-- direction. I end back where I started, facing the direction I measured.
 local function calibrateHeading()
-  local p0 = findPlot()
-  if not p0 then return nil, "no reference to calibrate on" end
-  local turns = 0
-  while turtle.detect() and turns < 4 do turtle.turnRight(); turns = turns + 1 end
-  if turtle.detect() then return nil, "boxed in - cannot calibrate heading" end
-  if not turtle.forward() then return nil, "blocked stepping to calibrate" end
-  local p1 = findPlot()
-  turtle.back()
-  if not p1 then return nil, "lost the plot mid-calibration" end
-  return headingFromDelta(p0.rx - p1.rx, p0.rz - p1.rz)
+  local before = plotOffsetSet(scanBlocks())
+  if next(before) == nil then return nil, "no plot to calibrate on" end
+  for _ = 1, 4 do
+    if not turtle.detect() and turtle.forward() then
+      local after = plotOffsetSet(scanBlocks())
+      turtle.back()
+      local dir, score = bestStepDir(before, after)
+      -- require a solid overlap so noise at the range edge can't pick a heading
+      if dir and score and score >= 3 then return dir end
+    end
+    turtle.turnRight()
+  end
+  return nil, "couldn't read my facing - set me right beside the plot, not boxed in"
 end
 
 -- ----------------------------------------------------- scanner-less search
@@ -618,6 +655,29 @@ local function collectStaging(slot)
   end
 end
 
+-- "Bridge ON the turtle" supply (suck == "self"): an export lands directly in
+-- my inventory, in whatever slot was free. Consolidate every stack of `name`
+-- into the work slot so the build's fixed-slot logic still holds. Doubles as the
+-- recover-stranded step (a kill between export and gather leaves the items in
+-- me, so gathering first means the next restock never double-pulls).
+local function gatherToSlot(slot, name)
+  for s = 1, 16 do
+    if s ~= slot then
+      local d = turtle.getItemDetail(s)
+      if d and d.name == name then
+        turtle.select(s); turtle.transferTo(slot)
+      end
+    end
+  end
+  turtle.select(slot)
+end
+
+-- Collect a just-exported (or stranded) stack into `slot`, by whichever handoff
+-- the wizard calibrated: a chest cell we suck, or straight into our inventory.
+local function collectExport(slot, name)
+  if cfg.base.suck == "self" then gatherToSlot(slot, name) else collectStaging(slot) end
+end
+
 -- Restock `slot` to >= minCount of spec.name from AE: park, recover any stranded
 -- export, craft if AE can't cover the request (gate on OBSERVED stock, AM-2),
 -- export a batch to the staging cell, suck it, return to the build cell. All AE
@@ -631,7 +691,7 @@ local function restock(slot, spec, minCount, batch)
     return false
   end
   turtle.select(slot)
-  collectStaging(slot)
+  collectExport(slot, spec.name)
   local function slotCount()
     local d = turtle.getItemDetail(slot)
     return (d and d.name == spec.name) and turtle.getItemCount(slot) or 0
@@ -652,7 +712,7 @@ local function restock(slot, spec, minCount, batch)
     if want >= minCount then
       local n = bridge.exportItem({ name = spec.name, count = want },
         cfg.base.export_side or cfg.base.suck)
-      if n and n > 0 then collectStaging(slot) end
+      if n and n > 0 then collectExport(slot, spec.name) end
     end
   end
   local got = slotCount()
@@ -1187,9 +1247,21 @@ local function calibrateSupply(bridge0)
     end
   end
   if not probe then return nil, "AE has no stock to calibrate the handoff with" end
+  local function countOf(name)
+    local n = 0
+    for s = 1, 16 do
+      local d = turtle.getItemDetail(s)
+      if d and d.name == name then n = n + turtle.getItemCount(s) end
+    end
+    return n
+  end
   for _, side in ipairs(CAL_EXPORT_SIDES) do
+    local before = countOf(probe)
     local n = bridge0.exportItem({ name = probe, count = 1 }, side)
     if n and n > 0 then
+      -- did it land directly in my own inventory? (bridge mounted ON me)
+      if countOf(probe) > before then return { export_side = side, suck = "self" } end
+      -- else maybe it landed in a chest directly above/below me I can suck
       for _, dir in ipairs(CAL_SUCK_DIRS) do
         turtle.select(CAL_SLOT)
         local ok = (dir == "up" and turtle.suckUp()) or turtle.suckDown()
@@ -1200,12 +1272,12 @@ local function calibrateSupply(bridge0)
           end
         end
       end
-      -- exported but unreachable from a vertical suck: the chest on this side
-      -- isn't directly above/below me. The probe is stranded; keep probing.
+      -- exported but unreachable: the inventory on this side isn't mine and
+      -- isn't a chest above/below me. The probe is stranded; keep probing.
     end
   end
-  return nil, "exported but couldn't collect - put a chest above or below me, "
-    .. "with the bridge touching it"
+  return nil, "the bridge isn't feeding me - mount it touching me, "
+    .. "or put a chest above/below me with the bridge touching the chest"
 end
 
 local function runWizard(plotCount)
@@ -1250,8 +1322,13 @@ local function runWizard(plotCount)
   -- chest I can suck from), so the bridge can go anywhere adjacent to the chest
   local sup, serr = calibrateSupply(bridge0)
   if sup then
-    print(("farm: supply calibrated (export %s -> suck %s).")
-      :format(sup.export_side, sup.suck))
+    if sup.suck == "self" then
+      print(("farm: supply calibrated - bridge on my %s feeds me directly.")
+        :format(sup.export_side))
+    else
+      print(("farm: supply calibrated (export %s -> suck %s).")
+        :format(sup.export_side, sup.suck))
+    end
   else
     -- fall back to the classic chest-directly-below-me handoff; the self-test
     -- still proves the AE pull before any real plot, so a wrong guess aborts
@@ -1295,6 +1372,18 @@ end
 
 local args = { ... }
 local cmd = args[1]
+
+-- `farm reset`: wipe my generated state (config / blueprint / journal) back to
+-- first-run, for when a setup went wrong. `update` refreshes the program but
+-- never touches these, so this is the clean slate. Leaves startup.lua alone.
+if cmd == "reset" then
+  for _, f in ipairs({ CONF_PATH, BLUEPRINT, JOURNAL_PATH, JOURNAL_PATH .. ".bak" }) do
+    if fs.exists(f) then fs.delete(f) end
+  end
+  print("farm: reset - cleared config, blueprint, and journal.")
+  print("  run 'farm' to set up from scratch.")
+  return
+end
 
 -- `farm find`: a no-config dry run of the autonomous plot-find, so the operator
 -- can confirm the turtle sees their plot before committing to a build.

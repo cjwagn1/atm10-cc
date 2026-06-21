@@ -492,6 +492,22 @@ end
 -- vendor/AdvancedPeripherals .../MEBridgePeripheral.java): type "me_bridge",
 -- energy methods return AE units (1 AE = 2 FE), usage/input are
 -- per-tick rolling averages from AE2's energy service.
+-- Put a stack into the turtle's inventory (first matching/empty slot), as when
+-- an ME Bridge adjacent to the turtle exports straight into it. Mirrors the
+-- turtle's own giveItem consolidation.
+function Env:giveToTurtle(stack)
+  local t = self.turtle
+  if not t or not t.inv then return false end
+  for i = 1, 16 do
+    local s = t.inv[i]
+    if s and s.id == stack.id then s.count = s.count + stack.count; return true end
+  end
+  for i = 1, 16 do
+    if not t.inv[i] then t.inv[i] = stack; return true end
+  end
+  return false
+end
+
 function Env:addMeBridge(name, o)
   local env = self
   -- Applied Mekanistics chemicals on the ME network. Shape verified against
@@ -600,6 +616,21 @@ function Env:addMeBridge(name, o)
     exportItem = function(filter, side)
       local s = findItem(filter)
       if not s or (s.count or 0) <= 0 then return 0, "ITEM_NOT_FOUND" end
+      local want = (type(filter) == "table" and filter.count) or 64
+      -- Bridge ON the turtle: exporting toward the turtle (side == o.intoTurtle)
+      -- pushes straight into its inventory (getHandlerFromDirection returns the
+      -- adjacent turtle's IItemHandler - source-verified). Any other side finds
+      -- no inventory.
+      if o.intoTurtle then
+        if side ~= o.intoTurtle then return 0, "INVENTORY_NOT_FOUND" end
+        local n = math.min(want, s.count)
+        local stack = { id = s.id, count = n, components = s.components,
+          onUse = s.onUse, makeBlock = s.makeBlock, cropId = s.cropId,
+          displayName = s.displayName, damage = s.damage, maxDamage = s.maxDamage }
+        if not env:giveToTurtle(stack) then return 0, "INVENTORY_FULL" end
+        s.count = s.count - n
+        return n
+      end
       -- Side-aware delivery. o.deliver = { side, cell } models a chest on
       -- exactly ONE side of the bridge (the operator's "bridge next to a
       -- chest"): exporting to any other side finds no inventory, like the real
@@ -613,7 +644,6 @@ function Env:addMeBridge(name, o)
         if not o.exportCell then return 0, "INVENTORY_NOT_FOUND" end
         c = o.exportCell
       end
-      local want = (type(filter) == "table" and filter.count) or 64
       local n = math.min(want, s.count)
       s.count = s.count - n
       local key = keyOf(c.x, c.y, c.z)
@@ -1640,6 +1670,31 @@ local function buildTurtleApi(env, osT)
       end
     end
     return d
+  end
+
+  -- transferTo(slot[, count]): move up to count from the selected slot into slot,
+  -- stacking onto a same-id stack (TurtleInventory). Used by the farm builder to
+  -- gather an AE export that landed in some free slot into its work slot.
+  function T.transferTo(slot, count)
+    if type(slot) ~= "number" or slot < 1 or slot > 16 then
+      error("bad argument #1 (slot out of range)", 2)
+    end
+    local src = t.inv[t.sel]
+    if not src or src.count < 1 then return false end
+    if slot == t.sel then return true end
+    local n = math.min(count or src.count, src.count)
+    local dst = t.inv[slot]
+    if dst then
+      if dst.id ~= src.id then return false end -- can't stack different items
+      dst.count = dst.count + n
+    else
+      t.inv[slot] = { id = src.id, count = n, components = src.components,
+        onUse = src.onUse, makeBlock = src.makeBlock, cropId = src.cropId,
+        displayName = src.displayName, damage = src.damage, maxDamage = src.maxDamage }
+    end
+    src.count = src.count - n
+    if src.count <= 0 then t.inv[t.sel] = nil end
+    return true
   end
 
   return T

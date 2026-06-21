@@ -676,6 +676,101 @@ T("setup wizard (no scanner): finds the plot on foot and builds a copy", functio
     "copy center water")
 end)
 
+-- A radius-16 scan costs ~5274 fuel (SphereOperation getCost); a radius-8 scan
+-- is FREE. The wizard scans several times, so a costly radius drains the turtle
+-- and every later scan fails ("found once, now never"). Default to the free 8;
+-- a bigger radius needs an explicit arg.
+T("find: default scan is the free radius 8 (a costly 16 needs an explicit arg)", function()
+  local function plotAt11()
+    local env = CC.new{ turtle = { pos = { x = 0, y = 70, z = 0 },
+      facing = "north", fuel = 5000 } }
+    env:addGeoScanner("scanner")
+    for dx = 0, 2 do
+      for dz = 0, 2 do
+        env:setBlock(11 + dx, 64, dz, { id = "minecraft:farmland" })
+      end
+    end
+    return env
+  end
+  local e1 = plotAt11(); current = e1
+  e1:run(FARM, { "find" }, { maxTime = 30 })
+  expectContains(e1:termText(), "no plot found",
+    "the free radius-8 default doesn't reach 11 blocks")
+  local e2 = plotAt11(); current = e2
+  e2:run(FARM, { "find", "16" }, { maxTime = 30 })
+  expectContains(e2:termText(), "found a 3x3 plot", "an explicit radius 16 reaches it")
+end)
+
+-- A turtle can only call a peripheral that's touching it; a chest can't be
+-- face-adjacent to both the turtle and an adjacent bridge. So the simplest setup
+-- is the ME Bridge ON the turtle, exporting straight into its inventory
+-- (getHandlerFromDirection returns the adjacent turtle's handler - source-
+-- verified). The wizard detects this (suck="self") and gathers pulls into the
+-- work slot. No chest, no suck cell.
+T("setup wizard: a bridge ON the turtle exports straight into it (no chest)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "east", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, 3, 74, 0, 3, 3)
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  local water = env:waterBucketItem(); water.count = 16
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    intoTurtle = "north", -- bridge on my north face; export pushes into my inventory
+    items = { dirt, hoe, fert, seed, water, coal } })
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  local conf = loadTable(env:file("farm.conf"), "farm.conf")
+  eq(conf.base.suck, "self", "detected the direct-into-turtle handoff")
+  eq(conf.base.export_side, "north", "recorded the export side that feeds me")
+  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, 3, 0), 8, "copy built pulling straight into the turtle")
+end)
+
+-- Heading calibration steps one block and reads the plot offset shift. At the
+-- scan-range edge the bbox MIN can "stick" on the boundary (the leaving block is
+-- replaced by its neighbour), so the old bbox-delta read 0 and failed. The
+-- cross-correlation of the two scans reads the true step direction regardless.
+T("setup wizard: reads heading even when a step pushes the plot to the range edge", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
+    facing = "east", fuel = 90000 } }
+  env:addGeoScanner("scanner")
+  seedRefPlot(env, -8, 74, 0, 3, 3) -- plot 8 west: the edge of the free radius-8 scan
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  local water = env:waterBucketItem(); water.count = 16
+  local coal = { id = "minecraft:coal_block", count = 64 }
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    intoTurtle = "north", items = { dirt, hoe, fert, seed, water, coal } })
+  current = env
+  local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectContains(env:termText(), "facing east", "read the true heading despite the edge step")
+  eq(countLayer(env, 76, "farmingforblockheads:fertilized_farmland_healthy",
+    3, 3, -8, 0), 8, "copy built at the correct (un-rotated) location")
+end)
+
+T("reset: wipes config, blueprint, and journal back to first-run state", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100 } }
+  env.files["farm.conf"] = "return { origin = { x = 0, y = 0, z = 0 } }"
+  env.files["farm.blueprint"] = "return { size = { w = 1, h = 1, d = 1 }, cells = {} }"
+  env.files["farm.journal"] = "phase=build\npos=0,0,0\nheading=east\n"
+  env.files["farm.journal.bak"] = "phase=build\npos=0,0,0\nheading=east\n"
+  current = env
+  env:run(FARM, { "reset" }, { maxTime = 10 })
+  eq(env:file("farm.conf"), nil, "config deleted")
+  eq(env:file("farm.blueprint"), nil, "blueprint deleted")
+  eq(env:file("farm.journal"), nil, "journal deleted")
+  eq(env:file("farm.journal.bak"), nil, "journal backup deleted")
+end)
+
 -- ------------------------------------------- 3. farm.lua: capture (Q3)
 -- Inspect-traversal of a reference plot -> normalized blueprint. Fertilized
 -- farmland becomes a soil recipe (build = dirt + till + fertilize), never a
