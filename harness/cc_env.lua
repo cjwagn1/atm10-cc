@@ -240,6 +240,10 @@ function M.new(opts)
     local o = opts.turtle
     self.turtle = {
       pos = { x = o.pos.x, y = o.pos.y, z = o.pos.z },
+      -- highest Y the turtle has ever occupied (incl. its start). Lets a test
+      -- assert navSafe's travel ceiling - i.e. that an early-plot restock does
+      -- NOT over-climb to cfg.travel_y but only to the built ceiling.
+      maxY = o.pos.y,
       facing = o.facing or "north",
       fuel = o.fuel or 0,
       -- advanced turtle default: limit 100,000 (C4, pack
@@ -1484,6 +1488,7 @@ local function buildTurtleApi(env, osT)
     end
     if t.fuel < 1 then return false, "Out of fuel" end
     t.pos.x, t.pos.y, t.pos.z = x, y, z
+    if y > t.maxY then t.maxY = y end
     t.fuel = t.fuel - 1
     env:rescanSides(false)
     return true

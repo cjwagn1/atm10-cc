@@ -1147,6 +1147,9 @@ T("diag: capability self-test reports every capability PASS and leaves no mess",
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
     blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6,
     usage = 5, craftSeconds = 1, items = { dirt, hoe, fert, seed, water } })
+  -- a Geo Scanner with a block in reach so the timed diag SCAN line reports PASS
+  env:addGeoScanner("scanner")
+  env:setBlock(0, 63, 0, { id = "minecraft:dirt" }) -- one block for the scan to see
   current = env
   local res = env:run(FARM, { "diag" }, { maxTime = 4000 })
   eq(res.reason, "done", "diag ran (err=" .. tostring(res.err) .. ")")
@@ -1155,6 +1158,9 @@ T("diag: capability self-test reports every capability PASS and leaves no mess",
   -- the operator's record (share with `pastebin put farm.log`)
   local log = env:file("farm.log") or ""
   -- every capability the build depends on reported PASS, in colon form per step
+  expectContains(log, "SCAN: PASS", "the timed scan capability reported PASS")
+  expectContains(log, "geo_scanner", "named the scanner peripheral type")
+  expectContains(log, "captureScan3D", "named which capture path would run")
   expectContains(log, "AE STOCK PULL: PASS", "stock pull works")
   expectContains(log, "AE CRAFT: PASS", "ran the craft probe")
   expectContains(log, "PLACE DIRT: PASS", "placed dirt in clear air")
@@ -1180,6 +1186,75 @@ T("diag: capability self-test reports every capability PASS and leaves no mess",
       end
     end
   end
+end)
+
+-- The diag SCAN line: a FAST, isolated check that the Geo Scanner is detected and
+-- the scan is quick - separating the scanner (seconds) from the navigation (the
+-- 6-minute up-and-down the operator saw). It runs early, while docked, alongside
+-- the AE checks: report the scanner type (or NOT FOUND), the block count, the
+-- elapsed seconds, and which capture path would run (captureScan3D with a scanner,
+-- else the slow captureProbe). PASS iff a scanner is found and the scan returns
+-- blocks.
+T("diag: the SCAN line reports PASS, the block count, and the scanner type", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "north", fuel = 50000 } }
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 0, z = 0 }, size = { w = 1, h = 1, d = 1 },
+    heading = "north", scan_y = 2,
+    start = { x = 0, y = 64, z = 0 }, start_heading = "north",
+    build = { x = 0, y = 0, z = 0 }, plots = 1, fleet = "farm1",
+  }]]
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
+    blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6,
+    usage = 5, items = { dirt } })
+  env:addGeoScanner("scanner") -- registers the real "geo_scanner" type
+  -- a couple of blocks for the scan to return (proves a non-zero count)
+  env:setBlock(0, 63, 0, { id = "minecraft:dirt" })
+  env:setBlock(1, 64, 0, { id = "minecraft:stone" })
+  current = env
+  local res = env:run(FARM, { "diag" }, { maxTime = 4000 })
+  eq(res.reason, "done", "diag ran (err=" .. tostring(res.err) .. ")")
+  local log = env:file("farm.log") or ""
+  expectContains(log, "SCAN: PASS", "scanner found + scan returned blocks => PASS")
+  expectContains(log, "geo_scanner", "reported the scanner peripheral type")
+  expectContains(log, "captureScan3D", "named the capture path a scanner would take")
+  -- the block count is reported (the scan saw the seeded blocks); the count must
+  -- be a positive number in the SCAN narrative
+  local scanLine
+  for line in (log .. "\n"):gmatch("([^\n]*)\n") do
+    if line:find("SCAN:", 1, true) then scanLine = line end
+  end
+  if not scanLine then fail("no SCAN line in the diag log") end
+  local count = scanLine:match("(%d+) block")
+  if not count or tonumber(count) < 1 then
+    fail("SCAN line did not report a positive block count: " .. tostring(scanLine))
+  end
+end)
+
+-- Without a scanner the SCAN line FAILs loudly (NOT FOUND) and names the SLOW
+-- captureProbe path - so the operator sees exactly why capture would be slow.
+T("diag: the SCAN line FAILs and names the probe path when no scanner is present", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "north", fuel = 50000 } }
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 0, z = 0 }, size = { w = 1, h = 1, d = 1 },
+    heading = "north", scan_y = 2,
+    start = { x = 0, y = 64, z = 0 }, start_heading = "north",
+    build = { x = 0, y = 0, z = 0 }, plots = 1, fleet = "farm1",
+  }]]
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
+    blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6,
+    usage = 5, items = { dirt } })
+  -- NO geo scanner attached
+  current = env
+  local res = env:run(FARM, { "diag" }, { maxTime = 4000 })
+  eq(res.reason, "done", "diag ran (err=" .. tostring(res.err) .. ")")
+  local log = env:file("farm.log") or ""
+  expectContains(log, "SCAN: FAIL", "no scanner => SCAN FAIL")
+  expectContains(log, "NOT FOUND", "reported the scanner is not found")
+  expectContains(log, "captureProbe", "named the slow probe path the build would fall back to")
 end)
 
 T("ae: an empty/disconnected bridge shows 0 item types and PULL FAILED", function()
@@ -1351,8 +1426,14 @@ end)
 -- blueprint with a hole the build then replicates across every stacked copy.
 -- Raising the radius is forbidden (a radius-16 scan is ~5274 fuel, the drain bug)
 -- - now that the harness deducts that cost, a "bump the radius" fix can't pass.
+-- The no-silent-truncation invariant: a footprint past the free radius-8 either
+-- captures in FULL (the radius is raised to the footprint, paying fuel) or fails
+-- LOUDLY - it never writes a blueprint with a plausible size header but a hole.
+-- Here too little fuel to pay for the radius-9 scan, so the scan fails loudly.
 T("capture: a footprint wider than the free radius-8 scan is not silently truncated", function()
-  local env = CC.new{ turtle = { pos = { x = 9, y = 66, z = 0 },
+  -- start AT the dead-reckoning origin (cfg.start defaults to origin.x/scan_y/
+  -- origin.z) so a successful capture scans from the true plot centre.
+  local env = CC.new{ turtle = { pos = { x = 0, y = 66, z = 0 },
     facing = "east", fuel = 200 } } -- too little fuel to afford a costly r>8 scan
   env:addGeoScanner("scanner")
   env.files["farm.conf"] = [[return {
@@ -1370,8 +1451,12 @@ T("capture: a footprint wider than the free radius-8 scan is not silently trunca
       fail("blueprint silently truncated: far-edge column 18,0,0 missing")
     end
   else
-    -- else it must have aborted loudly about exceeding the free radius
-    expectContains(env:termText(), "exceeds", "loud abort about the free radius")
+    -- else it must have failed LOUDLY (over the 16 max, or the paid scan ran out
+    -- of fuel) - never a silent truncation
+    local t = env:termText()
+    if not (t:find("exceeds", 1, true) or t:find("scan failed", 1, true)) then
+      fail("no blueprint and no loud failure - capture must abort loudly, not silently")
+    end
   end
 end)
 
@@ -1396,8 +1481,99 @@ T("capture: a plot taller than the free radius-8 scan keeps its floor layer", fu
       fail("blueprint silently dropped the floor layer (0,0,0)")
     end
   else
-    expectContains(env:termText(), "exceeds", "loud abort about the free radius")
+    local t = env:termText()
+    if not (t:find("exceeds", 1, true) or t:find("scan failed", 1, true)) then
+      fail("no blueprint and no loud failure - capture must abort loudly, not silently")
+    end
   end
+end)
+
+-- captureScan3D covers the FULL 3D footprint. The scan radius is computed from
+-- the footprint extents (cube reach per axis - the AP scanner traverses a cube,
+-- ScanUtils.traverseBlocks ±radius, NOT a sphere) and capped at the 16-block max.
+-- A footprint whose corners exceed the free radius 8 but fit within 16 is now
+-- CAPTURED in full (the radius is raised to the need), not aborted - so no corner
+-- cell is ever silently dropped. A footprint that exceeds 16 still aborts loudly.
+
+-- A 21-wide plot needs radius 10 (max |offset| from the centre column = 10),
+-- exceeding the free 8 but within 16. Under the OLD fixed radius-8 scan this
+-- aborted ("exceeds"); now it captures every column including both far edges.
+T("capture: a footprint past the free radius-8 but within 16 is captured in full", function()
+  -- start AT the program's dead-reckoning origin (cfg.start defaults to origin.x,
+  -- scan_y, origin.z) so navTo to the plot centre tracks the real turtle.
+  local env = CC.new{ turtle = { pos = { x = 0, y = 66, z = 0 },
+    facing = "east", fuel = 50000 } } -- ample fuel for the (paid) radius>8 scan
+  env:addGeoScanner("scanner")
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 21, h = 1, d = 1 },
+    heading = "east", scan_y = 66, fleet = "farm1",
+  }]]
+  for ix = 0, 20 do env:setBlock(ix, 64, 0, { id = "minecraft:farmland" }) end
+  current = env
+  local res = env:run(FARM, { "capture" }, { maxTime = 600 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "exceeds", "21 wide fits radius 16 - no abort")
+  local bp = loadTable(env:file("farm.blueprint"), "blueprint")
+  -- every column present, no hole - both far edges and the centre
+  for ix = 0, 20 do
+    if not bp.cells[ix .. ",0,0"] then
+      fail("column " .. ix .. " dropped: capture left a hole within the 16-radius reach")
+    end
+  end
+end)
+
+-- The hardest case the task calls out: a far-BOTTOM corner of a tall, wide plot.
+-- A 17x6x3 footprint scanned from its top-centre cell reaches a bottom corner at
+-- per-axis offsets (8, scan_y-floor, 1). The capture must include EVERY one of the
+-- 17*6*3 footprint cells - no corner silently dropped.
+T("capture: every cell of a tall+wide footprint is captured (no dropped corner)", function()
+  -- start AT the dead-reckoning origin (origin.x, scan_y, origin.z); the program
+  -- navTo's from there to the plot centre (cx, scan_y, cz).
+  local env = CC.new{ turtle = { pos = { x = 0, y = 74, z = 0 },
+    facing = "east", fuel = 50000 } } -- hover high above a 17x6x3 plot
+  env:addGeoScanner("scanner")
+  -- origin (0,64,0); w17 d6 h3. scan_y (74) hovers 10 above the floor (y64), so the
+  -- vertical reach to the floor (10) exceeds the free radius 8 - the radius must be
+  -- raised to 10 to keep the floor corners, exercising the >8 (paid) scan path.
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 17, h = 3, d = 6 },
+    heading = "east", scan_y = 74, fleet = "farm1",
+  }]]
+  for ix = 0, 16 do
+    for iz = 0, 5 do
+      for dy = 0, 2 do
+        env:setBlock(ix, 64 + dy, iz,
+          { id = dy == 0 and "minecraft:farmland" or "mysticalagriculture:essence_farmland" })
+      end
+    end
+  end
+  current = env
+  local res = env:run(FARM, { "capture" }, { maxTime = 600 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "exceeds", "the footprint fits radius 16")
+  local bp = loadTable(env:file("farm.blueprint"), "blueprint")
+  local missing = 0
+  for ix = 0, 16 do for iz = 0, 5 do for dy = 0, 2 do
+    if not bp.cells[ix .. "," .. dy .. "," .. iz] then missing = missing + 1 end
+  end end end
+  eq(missing, 0, "all 17*6*3 footprint cells captured (no dropped corner)")
+end)
+
+-- An OVERSIZE footprint (wider than the 16-block max reach) still aborts LOUDLY -
+-- never writes a truncated blueprint. 35 wide needs radius 17 > 16.
+T("capture: a footprint exceeding the 16-block max scan still aborts loudly", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 66, z = 0 },
+    facing = "east", fuel = 50000 } }
+  env:addGeoScanner("scanner")
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 35, h = 1, d = 1 },
+    heading = "east", scan_y = 66, fleet = "farm1",
+  }]]
+  for ix = 0, 34 do env:setBlock(ix, 64, 0, { id = "minecraft:farmland" }) end
+  current = env
+  env:run(FARM, { "capture" }, { maxTime = 600 })
+  eq(env:file("farm.blueprint"), nil, "no blueprint written for an oversize footprint")
+  expectContains(env:termText(), "exceeds", "loud abort about exceeding the max scan")
 end)
 
 -- fix #6: the Geo Scanner returns only name/x/y/z/tags per block - NEVER a
@@ -2004,6 +2180,120 @@ T("supply: a blocked restock-park path restores heading + clears intent", functi
   local j = parseFarmJournal(env:file("farm.journal"))
   if j then eq(j.intent, nil, "no orphaned restock intent left in the journal") end
   eq(env.turtle.facing, "east", "heading restored to the build heading (not the corridor)")
+end)
+
+-- ----------------------------------- navSafe travel ceiling (the speed fix)
+-- navSafe rises to a clear ceiling, crosses horizontally, then descends - so the
+-- corridor never crashes through the partially-built stack. The OLD ceiling was
+-- the UNCONDITIONAL cfg.travel_y, sized for the FULLY-built stack (build.y +
+-- plots*size.h + clearance). On an EARLY plot almost nothing is up there yet, so
+-- every restock wasted a tall climb to travel_y. The fix: climb only as high as
+-- what is ACTUALLY built - builtCeil = build.y + (S.plot+1)*size.h + clearance -
+-- which still clears the existing farm (below build.y) and the finished plots
+-- (below builtCeil), and is always <= travel_y, so it never climbs HIGHER than
+-- today. These tests pin both: it still clears the built structure on a horizontal
+-- move (the build completes), and it does NOT over-climb to travel_y on plot 0.
+
+-- A low, tall (many-plot) stack so travel_y sits well above the early-plot
+-- builtCeil, with the turtle parked LOW (so a stray-high maxY can only come from
+-- an over-climb, never from the start pose). Empty work slots force a restock on
+-- plot 0; the bridge stocks everything. ceilBlock (optional) drops a block in the
+-- build column between builtCeil and travel_y: it would obstruct the OLD over-
+-- climb (navSafe false -> build fails) but is above the NEW builtCeil, so the fix
+-- sails under it. Returns env + the two ceilings for the assertions.
+local function navCeilRig(opts)
+  opts = opts or {}
+  -- Build ONE plot (so the measured maxY reflects plot 0 only - later plots have
+  -- a HIGHER, legitimate builtCeil), but size travel_y as if for an 8-plot stack
+  -- (the real conf sizes travel_y for the planned full stack). The fix must keep
+  -- plot 0 well below that full-stack travel_y.
+  local buildY, plots, h, clr = 100, 1, 2, 3
+  local travelY = buildY + 8 * h + 4 -- 120: the full (8-plot) stack ceiling (>> builtCeil)
+  local builtCeil = buildY + (0 + 1) * h + clr -- plot 0 in progress: 105
+  -- park LOW and OFF the stack (z=-2), at the build base height; the turtle starts
+  -- AT the park so its initial maxY is buildY, well below builtCeil.
+  local env = CC.new{ turtle = { pos = { x = 0, y = buildY, z = -2 },
+    facing = "east", fuel = 200000 } }
+  env.files["farm.blueprint"] = opts.blueprint or BP_3x3
+  env.files["farm.conf"] = ([[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 3, h = 2, d = 3 },
+    heading = "east", lateral = "south", scan_y = 66,
+    start = { x = 0, y = %d, z = -2 }, start_heading = "east",
+    build = { x = 0, y = %d, z = 0 }, plots = %d, fleet = "farm1",
+    travel_y = %d, clearance = %d,
+    base = { bridge = "me", park = { x = 0, y = %d, z = -2 },
+      staging = { x = 0, y = %d, z = -2 }, suck = "down", export_side = "up" },
+  }]]):format(buildY, buildY, plots, travelY, clr, buildY, buildY - 1)
+  local dirt = { id = "minecraft:dirt", count = 256, isCraftable = false }
+  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
+  seed.isCraftable = false
+  local water = env:waterBucketItem(); water.count = 16; water.isCraftable = false
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    exportCell = { x = 0, y = buildY - 1, z = -2 },
+    items = { dirt, fert, seed, water } })
+  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } } -- only a hoe; work slots empty -> restock on plot 0
+  if opts.ceilBlock then
+    -- a ceiling block in the build column ABOVE builtCeil but BELOW travel_y: only
+    -- the old over-climb (to travel_y) hits it.
+    env:setBlock(0, opts.ceilBlock, 0, { id = "minecraft:stone" })
+  end
+  if opts.resume then
+    -- a journal-resume (phase=build) so the one-time fresh-build top probe
+    -- (skipBuiltPlots, which legitimately rises to travel_y once over an EXISTING
+    -- stack) is skipped - isolating the PER-RESTOCK ceiling we are measuring.
+    env.files["farm.journal"] =
+      ("phase=build\nplot=0\ndy=0\npos=0,%d,-2\nheading=east\n"):format(buildY)
+  end
+  return env, builtCeil, travelY
+end
+
+-- The fix must NOT regress correctness: navSafe still clears the built structure
+-- on a horizontal move, so an early-plot build with restocks runs to completion.
+T("navSafe: an early-plot restock still clears the built stack (build completes)", function()
+  local env = navCeilRig()
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 30000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  -- plot 0 fully built (8 fertilized ring cells) - the restock corridor worked
+  eq(countLayer(env, 100, "farmingforblockheads:fertilized_farmland_healthy"), 8,
+    "plot 0 soil ring built (restock cleared the structure)")
+end)
+
+-- The speed fix proper: on plot 0 the turtle must rise only to builtCeil, NEVER to
+-- travel_y. With the turtle parked LOW, maxY can only exceed builtCeil via an
+-- over-climb - so assert maxY == builtCeil and is strictly below travel_y.
+T("navSafe: an early-plot restock climbs to builtCeil, not the full-stack travel_y", function()
+  local env, builtCeil, travelY = navCeilRig{ resume = true }
+  current = env
+  local res = env:run(FARM, {}, { maxTime = 30000 }) -- bare resume (uses the journal)
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  if travelY <= builtCeil then fail("rig misconfigured: travel_y must exceed builtCeil") end
+  if env.turtle.maxY > builtCeil then
+    fail(("over-climbed: maxY=%d exceeds builtCeil=%d (travel_y=%d) - navSafe still "
+      .. "rises to the full-stack ceiling on plot 0"):format(
+      env.turtle.maxY, builtCeil, travelY))
+  end
+  eq(env.turtle.maxY, builtCeil, "rose exactly to the built ceiling on plot 0")
+end)
+
+-- The complement, proving the assertion above has teeth: a block parked BETWEEN
+-- builtCeil and travel_y obstructs the OLD over-climb (it would rise into it and
+-- navSafe would fail), but the fixed climb sails UNDER it, so the build still
+-- completes. (Under the old code this block would halt the build.)
+T("navSafe: a ceiling block above builtCeil but below travel_y no longer blocks the build", function()
+  local env, builtCeil, travelY = navCeilRig{ ceilBlock = 115, resume = true }
+  current = env
+  if not (115 > builtCeil and 115 < travelY) then
+    fail("rig misconfigured: the ceiling block must sit between builtCeil and travel_y")
+  end
+  local res = env:run(FARM, {}, { maxTime = 30000 }) -- bare resume (uses the journal)
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(countLayer(env, 100, "farmingforblockheads:fertilized_farmland_healthy"), 8,
+    "plot 0 built - the fixed climb passes under the high ceiling block")
+  if env.turtle.maxY >= 115 then
+    fail(("climbed into the ceiling-block layer: maxY=%d >= 115"):format(env.turtle.maxY))
+  end
 end)
 
 -- -------------------------------------------- 6. farm.lua: self-test gate

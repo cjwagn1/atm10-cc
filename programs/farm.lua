@@ -296,11 +296,24 @@ local function navTo(tx, ty, tz)
 end
 
 -- Travel between the build column and the restock park without crashing
--- through the partially-built stack: rise to a clear ceiling above everything,
--- move horizontally, then descend onto the target. The ceiling is cfg.travel_y
--- (above plot count * height), guaranteeing an obstruction-free corridor.
+-- through the partially-built stack: rise to a clear ceiling above everything
+-- BUILT SO FAR, move horizontally, then descend onto the target. The ceiling
+-- only needs to clear what is ACTUALLY built: the existing farm (which sits
+-- BELOW build.y) and the plots finished so far (build.y .. build.y + S.plot *
+-- size.h). cfg.travel_y is sized for the FULLY-built stack, so rising to it on
+-- an early plot wastes a tall climb on EVERY restock (the 6-minute "scanning up
+-- and down" the operator saw). builtCeil = build.y + (S.plot+1)*size.h +
+-- clearance clears the existing farm (builtCeil >= build.y) and every built plot
+-- (plot S.plot is the one in progress) with a clearance margin, and is always
+-- <= travel_y for S.plot < plots - so it never climbs HIGHER than before, it just
+-- stops over-climbing early. Fall back to travel_y when the build geometry isn't
+-- available (e.g. capture/selftest with no S.plot).
 local function navSafe(tx, ty, tz)
-  local ceil = math.max(S.pos.y, ty, cfg.travel_y or ty)
+  local builtCeil = cfg.travel_y or ty
+  if cfg.build and cfg.size and S and S.plot ~= nil then
+    builtCeil = cfg.build.y + (S.plot + 1) * cfg.size.h + (cfg.clearance or 3)
+  end
+  local ceil = math.max(S.pos.y, ty, builtCeil)
   while S.pos.y < ceil do if not goUp() then return false end end
   if S.pos.x < tx then faceTo("east") elseif S.pos.x > tx then faceTo("west") end
   while S.pos.x ~= tx do if not goFwd() then return false end end
@@ -420,6 +433,11 @@ end
 -- wizard scans several times, so a costly radius drains the turtle and then every
 -- scan fails. Default to the free radius; `farm find <r>` can pay for a wider one.
 local SCAN_RADIUS = 8
+-- The scanner's hard maximum reach (AP GeoScanner SCAN_BLOCKS.getMaxCostRadius);
+-- a single scan can't see past it, so a footprint needing more must abort. Beyond
+-- SCAN_RADIUS (free) a scan costs fuel, so capture sizes the radius to the
+-- footprint and never scans wider than needed.
+local SCAN_MAX_RADIUS = 16
 
 local function scanBlocks(radius)
   local scanner = findScanner()
@@ -711,35 +729,42 @@ local function writeBlueprint(cells, w, h, d)
   return true
 end
 
--- Full-3D capture: hover above the plot CENTRE so one free scan (radius 8 reaches
--- +-8 = up to a 17-wide footprint) covers everything, then map each scanned
--- block offset to a plot cell (ix,dy,iz) and classify it. Sees every layer.
+-- Full-3D capture: hover above the plot CENTRE so ONE scan sized to the footprint
+-- covers everything (radius-8 free reaches +-8 = a 17-wide footprint; a larger
+-- plot pays for a wider scan up to the 16-block max), then map each scanned block
+-- offset to a plot cell (ix,dy,iz) and classify it. Sees every layer.
 local function captureScan3D()
   local w, h, d = cfg.size.w, cfg.size.h, cfg.size.d
   local cx = cfg.origin.x + math.floor(w / 2)
   local cz = cfg.origin.z + math.floor(d / 2)
-  -- The largest |offset| any in-range cell has from the scan centre (cx, scan_y,
-  -- cz). A free scan only reaches +-8, so if the footprint pushes any column or
-  -- the floor past that, a single radius-8 scan would silently drop those cells
-  -- and write a blueprint with a plausible size header but a hole. Raising the
-  -- radius is forbidden (a radius-16 scan is ~5274 fuel - the drain bug), so
-  -- abort LOUDLY instead of capturing a truncated plot (fix #3).
+  -- The radius needed to reach EVERY footprint cell from the scan centre (cx,
+  -- scan_y, cz). The AP Geo Scanner traverses a CUBE - ScanUtils.traverseBlocks
+  -- iterates minX..maxX / minY..maxY / minZ..maxZ at +-radius per axis (NOT a
+  -- sphere) - so the reach metric is the per-axis (Chebyshev) max, the largest
+  -- |offset| any in-range cell has from the centre. A radius too small for any one
+  -- axis silently drops those cells and writes a blueprint with a plausible size
+  -- header but a hole; so size the scan to the FULL footprint. Beyond the free
+  -- radius (SCAN_RADIUS=8) a wider scan costs fuel, so scan only as wide as the
+  -- footprint actually needs - never the costly max for a small plot. The hard
+  -- ceiling is the scanner's 16-block reach (SCAN_MAX_RADIUS): a footprint past
+  -- that can't be captured in one scan, so abort LOUDLY rather than truncate
+  -- (fix #3). A typical fused plot (<=17 wide, short) needs <=8 and stays free.
   local need = math.max(
     math.floor(w / 2), w - 1 - math.floor(w / 2),
     math.floor(d / 2), d - 1 - math.floor(d / 2),
     cfg.scan_y - cfg.origin.y, (cfg.origin.y + h - 1) - cfg.scan_y)
-  if need > SCAN_RADIUS then
-    print(("farm: plot footprint (need radius %d) exceeds the free radius-%d "
-      .. "scan; capture would drop the edges. Shrink the plot or re-place me so "
-      .. "the whole footprint is within %d of the scan centre.")
-      :format(need, SCAN_RADIUS, SCAN_RADIUS))
+  if need > SCAN_MAX_RADIUS then
+    print(("farm: plot footprint (need radius %d) exceeds the scanner's %d-block "
+      .. "max; capture would drop the edges. Shrink the plot or re-place me so the "
+      .. "whole footprint is within %d of the scan centre.")
+      :format(need, SCAN_MAX_RADIUS, SCAN_MAX_RADIUS))
     return false
   end
   if not navTo(cx, cfg.scan_y, cz) then
     print("farm: capture couldn't reach the plot centre.")
     return false
   end
-  local blocks, err = scanBlocks(8)
+  local blocks, err = scanBlocks(need)
   if not blocks then
     print("farm: capture scan failed (" .. tostring(err) .. ").")
     return false
@@ -2186,6 +2211,41 @@ if cmd == "diag" then
   end
   print(("  connected=%s online=%s"):format(
     tostring(bcall("isConnected")), tostring(bcall("isOnline"))))
+
+  -- SCAN: a FAST, isolated proof that the Geo Scanner is detected and the scan is
+  -- quick - so the operator can separate the scan (seconds) from the NAVIGATION
+  -- (the multi-minute up-and-down). Find the scanner, report its peripheral type
+  -- (or NOT FOUND), TIME one scan, and name which capture path the build would run
+  -- (captureScan3D with a scanner, else the slow column-probe captureProbe). PASS
+  -- iff a scanner is found and the scan returns blocks. Runs early, while docked.
+  step("SCAN", function()
+    local scanner = findScanner()
+    if not scanner then
+      return false, "scanner NOT FOUND - capture would use the slow captureProbe path"
+    end
+    -- the peripheral type string for the operator (findScanner returns the wrapped
+    -- handle, not its name) - match the same scan()-method shape findScanner uses
+    local stype = "geo_scanner"
+    if peripheral and peripheral.getNames then
+      for _, n in ipairs(peripheral.getNames()) do
+        local ok, m = pcall(peripheral.wrap, n)
+        if ok and type(m) == "table" and type(m.scan) == "function" then
+          local ts = { peripheral.getType(n) }
+          stype = ts[1] or stype
+          break
+        end
+      end
+    end
+    local t0 = os.clock()
+    local blocks, err = scanBlocks()
+    local elapsed = os.clock() - t0
+    if not blocks then
+      return false, ("scanner %s found but the scan failed (%s)")
+        :format(stype, tostring(err))
+    end
+    return true, ("scanner %s, %d blocks in %.2fs -> captureScan3D")
+      :format(stype, #blocks, elapsed)
+  end)
 
   -- export `name` x`count` from AE and collect it into `slot` by whatever handoff
   -- works (straight into me, or a chest above/below I suck) - diag's own pull,
