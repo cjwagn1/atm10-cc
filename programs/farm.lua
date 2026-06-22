@@ -13,8 +13,8 @@ Commands:
   farm capture     inspect-traversal of the reference plot -> farm.blueprint
   farm build       self-test, then build the stack (resumes if interrupted)
   farm selftest    run the startup self-tests only, build nothing
-  farm diag        FAST capability self-test (no plot scan): pull/craft/place/
-                   till/fertilize/plant/water in a clear column, PASS/FAIL each,
+  farm diag        FAST capability self-test (no plot scan): pull/craft/place-
+                   farmland/fertilize/plant/water in a clear column, PASS/FAIL each,
                    then clean up. Proves what works in-game in seconds.
   farm ae          diagnose the AE link (stock pull + a real craft probe)
   farm log         show the debug log (on|off step trace, clear); share it with
@@ -98,7 +98,11 @@ local function loadConf()
   -- inventory plan: the builder pulls everything from AE, so slots are work
   -- buffers, not a hand-stocked loadout
   conf.slots.dirt = conf.slots.dirt or 1
+  -- The build PLACES autocrafted farmland (no till), so the old hoe slot is freed
+  -- and REUSED as the farmland work slot. cfg.slots.hoe stays defined (harmless) so
+  -- any other reader doesn't break, but the build only uses cfg.slots.farmland.
   conf.slots.hoe = conf.slots.hoe or 2
+  conf.slots.farmland = conf.slots.farmland or conf.slots.hoe
   conf.slots.fertilizer = conf.slots.fertilizer or 3
   conf.slots.seed = conf.slots.seed or 4
   conf.slots.water = conf.slots.water or 5
@@ -112,14 +116,22 @@ local function loadConf()
   conf.plots = conf.plots or 1
   -- vertical gap between the existing farm's top and the first copy's soil layer.
   -- The capture height misses the top (un-captured) canopy layer (cables), so the
-  -- naive build base (origin.y + size.h) lands ON that canopy and the side-till
-  -- has no clear neighbour to drop beside the dirt -> halt "till". Start the stack
-  -- a few blocks ABOVE the farm in clear air. Honoured from an edited conf.
+  -- naive build base (origin.y + size.h) lands ON that canopy and the build can't
+  -- traverse the layer to reach its stance cells. Start the stack a few blocks ABOVE
+  -- the farm in clear air. Honoured from an edited conf. (The build no longer tills,
+  -- so a buried base no longer halts a single cell - but a flush canopy still
+  -- obstructs the turtle's movement across the build layer, so the gap stays useful.)
   conf.clearance = conf.clearance or 3
   -- AE item ids the builder pulls/crafts. Seeds are derived per crop from the
   -- blueprint; these are the fixed ones.
   conf.items = conf.items or {}
   conf.items.dirt = conf.items.dirt or "minecraft:dirt"
+  -- The placeable soil block: PLAIN minecraft:farmland (autocraftable like dirt).
+  -- The fertilized FfB variant is NOT item-placeable, so the build places plain
+  -- farmland and best-effort fertilizes on top. Sulfur grows on plain farmland
+  -- (MysticalCropBlock.requiresEffectiveFarmland defaults false), so fertilizing
+  -- is only a growth boost, never a blocker.
+  conf.items.farmland = conf.items.farmland or "minecraft:farmland"
   conf.items.hoe = conf.items.hoe or "minecraft:diamond_hoe"
   conf.items.fertilizer = conf.items.fertilizer
     or "farmingforblockheads:red_fertilizer"
@@ -363,9 +375,11 @@ end
 -- ------------------------------------------------------------- classify
 
 -- Map an inspected block to a normalized blueprint cell. Fertilized farmland is
--- recorded as a SOIL RECIPE (build = dirt + till + fertilize), never a
--- placeable block (FARM-RESEARCH Q3/§4 - the fertilized block is not item-
--- placeable). Crop age is dropped: the builder always plants fresh seeds.
+-- recorded as a SOIL RECIPE (kind=soil, tier=fertilized), never a placeable block
+-- (FARM-RESEARCH Q3/§4 - the fertilized block is not item-placeable). doSoil builds
+-- it by PLACING plain minecraft:farmland and best-effort fertilizing on top (the
+-- fertilized variant being uncraftable is fine; sulfur grows on plain farmland).
+-- Crop age is dropped: the builder always plants fresh seeds.
 local function classify(name, state)
   if name == "minecraft:water" then return { kind = "water" } end
   if name == "farmingforblockheads:fertilized_farmland_healthy" then
@@ -1000,6 +1014,25 @@ local function restock(slot, spec, minCount, batch)
       end
     end
   end
+  -- Evacuate a FOREIGN stack squatting in the work slot before collecting the
+  -- target: the supply calibration leaves its probe item (dirt) in the scratch
+  -- slot, and a prior op can strand the wrong item here too. A non-target stack
+  -- would block the suck (can't merge) and read slotCount()==0 -> a false miss.
+  -- Move it to a free slot (non-destructive); fall back to dropUp if the inventory
+  -- is full. Idempotent and harmless when the slot already holds the target / air.
+  do
+    local d = turtle.getItemDetail(slot)
+    if d and d.name ~= target then
+      turtle.select(slot)
+      local moved = false
+      for s = 1, 16 do
+        if s ~= slot and turtle.getItemCount(s) == 0 then
+          if turtle.transferTo(s) then moved = true; break end
+        end
+      end
+      if not moved then turtle.dropUp() end
+    end
+  end
   turtle.select(slot)
   collectExport(slot, target)
   local function slotCount()
@@ -1105,51 +1138,11 @@ local function refuelIfLow()
   return measuredRefuel(cfg.fuel_low + cfg.fuel_reserve)
 end
 
--- ANY hoe tills, so accept any *_hoe in the slot and pull any hoe the AE can give
--- (the operator's exact diamond hoe may have no encoded autocraft pattern even
--- if they can craft it by hand). spec.alt = "_hoe" lets restock substitute.
-local function isHoe(name) return type(name) == "string" and name:find("_hoe", 1, true) ~= nil end
-
-local function ensureHoe()
-  turtle.select(cfg.slots.hoe)
-  -- KILL SAFETY: tilling EQUIPS the hoe on the left side (CC's real till verb is
-  -- equip+dig). A reboot mid-till keeps an equipped upgrade on the turtle but leaves
-  -- the hoe SLOT empty, so a naive restock would report a false "no hoe available".
-  -- If the slot is empty/non-hoe, first try to RECOVER a side-equipped hoe by
-  -- swapping it back (equipLeft into the empty slot); harmless if nothing's equipped.
-  local d0 = turtle.getItemDetail(cfg.slots.hoe, true)
-  if not (d0 and isHoe(d0.name)) and turtle.equipLeft then
-    turtle.equipLeft()
-    local rec = turtle.getItemDetail(cfg.slots.hoe, true)
-    if not (rec and isHoe(rec.name)) and turtle.equipLeft then
-      turtle.equipLeft() -- not a hoe: put the side back the way it was
-    end
-  end
-  local d = turtle.getItemDetail(cfg.slots.hoe, true)
-  local hoeSpec = { name = cfg.items.hoe, alt = "_hoe" }
-  -- restock() prefers a STOCKED *_hoe over an autocraft (a craft can stall). If
-  -- even that fails, say EXACTLY what to do - a hoe in the slot is the surest fix
-  -- and the build is journaled, so re-running 'farm' resumes from here.
-  local function pull()
-    local ok = restock(cfg.slots.hoe, hoeSpec, 1, 1)
-    if not ok then
-      print(("farm: no hoe available. Drop ANY *_hoe in my slot %d and run "
-        .. "'farm' to resume, or stock/auto-craft one in AE."):format(cfg.slots.hoe))
-    end
-    return ok
-  end
-  if d and isHoe(d.name) then
-    -- restock before the hoe breaks mid-plot (Q1: ~one till-op per soil cell).
-    -- A worn hoe still occupies the slot, so evacuate it first so a fresh one
-    -- can be pulled in.
-    if d.maxDamage and (d.maxDamage - (d.damage or 0)) <= 1 then
-      turtle.select(cfg.slots.hoe); turtle.dropUp() -- discard the worn hoe
-      return pull()
-    end
-    return true
-  end
-  return pull()
-end
+-- NOTE: the build no longer tills, so it needs NO hoe. The old ensureHoe /
+-- equip+side-till machinery (and its kill-safety hoe recovery) is gone: doSoil now
+-- PLACES autocrafted farmland (above), which works on interior cells too. The hoe
+-- config keys (cfg.items.hoe / cfg.slots.hoe) are kept harmless for any external
+-- reader, but nothing in the build path equips or pulls a hoe.
 
 -- ----------------------------------------------------------- build cells
 -- Stance: the turtle stands one block ABOVE the target cell and works it with
@@ -1169,105 +1162,53 @@ end
 
 local FERTILIZED_SOIL = "farmingforblockheads:fertilized_farmland_healthy"
 
--- ROOT CAUSE (vendored, definitive): CC:Tweaked does NOT till with place()-with-hoe.
--- The hoe is a computercraft:tool UPGRADE, and tilling is a dig()/digDown() op:
--- TurtleTool.dig -> useTool runs the hoe's useOn BEFORE any break when
--- hasToolUsage(stack) is true (HOE_TILL; TurtleTool.java:265-324,
--- PlatformHelperImpl.java:206-208). CC's own gametests prove it: Hoe_dirt does
--- turtle.dig() -> FARMLAND and Hoe_dirt_below does turtle.digDown() -> FARMLAND
--- (Turtle_Test.kt:258-273). place()-with-hoe instead falls through TurtlePlaceCommand
--- (the hoe is not a Bucket/BlockItem, so it never gets the working useItem
--- special-case at :228-234) and silently no-ops - the operator's v52 SIDE-TILL halt.
---
--- So we EQUIP the hoe on a turtle side and DIG. equipHoe selects the hoe slot and
--- swaps it onto the LEFT side as a tool upgrade; equipping again swaps it back into
--- the slot. withHoeEquipped runs body() with the hoe equipped and always restores it.
-local function equipHoe()
-  turtle.select(cfg.slots.hoe)
-  return turtle.equipLeft()
-end
-local function unequipHoe()
-  turtle.select(cfg.slots.hoe)
-  return turtle.equipLeft() -- swap the equipped hoe back into the (now-empty) slot
-end
+-- NO TILLING (operator decision). The old build dug dirt then equipped a hoe and
+-- side-tilled it - reliable on EDGE cells (an open neighbour to step into) but a
+-- HALT on INTERIOR cells (no clear neighbour), and brittle in-game. CC:Tweaked's
+-- tilling is a dig()/digDown() tool-upgrade op (TurtleTool.java:265-324;
+-- Turtle_Test.kt:258-273), not place()-with-hoe - but we sidestep the whole verb:
+-- the build now PLACES autocrafted minecraft:farmland (a BlockItem) from the stance
+-- ABOVE the cell, which needs no neighbour and reaches interior cells too.
 
--- Till the dirt directly BELOW the current stance, equip-and-dig style (CC's real
--- mechanism). Step into a clear horizontal neighbour, drop to the dirt's own Y, face
--- back toward the dirt, EQUIP the hoe and turtle.dig() it as the block IN FRONT (its
--- block above is now air - the turtle vacated the stance, satisfying
--- HoeItem.onlyIfAirAbove). Tries ALL FOUR sides and only fails if none produced
--- farmland. Returns to the stance and restores the heading. Kill-safe: every move
--- journals S.pos, and a resume re-runs doSoil (tilling existing farmland is a no-op),
--- so a kill mid-side-till converges. The move return values are GUARDED so S.pos can
--- never desync (a blocked goUp/goFwd aborts the side instead of silently mis-tracking).
-local function tillBelowFromSide()
-  local saved = S.heading
-  equipHoe()
-  for _, dir in ipairs({ "north", "south", "east", "west" }) do
-    faceTo(dir)
-    -- the stance-level neighbour and the soil-level neighbour must both be clear
-    if not turtle.detect() and goFwd() then
-      if not turtle.detectDown() and goDown() then
-        faceTo(OPPD[dir]) -- face back toward the dirt cell (now in front)
-        intent("till"); turtle.dig(); clearIntent() -- equipped hoe tills the front
-        local has, info = turtle.inspect()
-        local tilled = has and (info.name == "minecraft:farmland"
-          or info.name == FERTILIZED_SOIL)
-        -- return to the stance: rise back to the stance layer, then step back into
-        -- the stance column (we already face OPPD[dir], i.e. toward it). GUARD the
-        -- moves: if either is blocked, restore heading + hoe and report failure
-        -- rather than leaving S.pos desynced one cell low/forward.
-        if not goUp() or not goFwd() then
-          faceTo(saved); unequipHoe(); return false
-        end
-        faceTo(saved)
-        if tilled then unequipHoe(); return true end
-      else
-        -- could not drop beside the dirt: back out of the neighbour and try next.
-        -- GUARD the step-back so a blocked exit doesn't desync S.pos.
-        faceTo(OPPD[dir])
-        if not goFwd() then faceTo(saved); unequipHoe(); return false end
-        faceTo(saved)
-      end
-    end
-  end
-  faceTo(saved)
-  unequipHoe()
-  return false
-end
-
+-- doSoil PLACES autocrafted farmland directly (operator decision: STOP TILLING).
+-- The old build dug dirt then side-tilled it; the side-till HALTED on interior
+-- cells (no clear neighbour to step into) and was unreliable in-game. A farmland
+-- BlockItem deploys from the stance ABOVE the cell (placeDown), needs no clear
+-- neighbour and no air-above gate, and works on interior cells too. The fertilized
+-- variant is NOT item-placeable, so we place PLAIN farmland and best-effort
+-- fertilize; sulfur grows on plain farmland, so a fertilize miss never halts.
 local function doSoil(tier)
   local cur = nameBelow()
-  if cur == nil then
-    if not ensureItem(cfg.slots.dirt, { name = cfg.items.dirt }, 1) then
-      return false, "no-dirt"
+  -- CONVERGE no-op: an already-farmland cell (plain OR fertilized) places nothing.
+  if cur ~= "minecraft:farmland" and cur ~= FERTILIZED_SOIL then
+    -- A foreign block (a stray dirt from a prior failed run) occupies the cell and
+    -- a BlockItem can't deploy onto it - clear it first, then place farmland over
+    -- the now-empty cell (a converge re-run heals the cell instead of halting).
+    if cur ~= nil then
+      turtle.select(cfg.slots.scratch); turtle.digDown()
     end
-    intent("dirt"); turtle.placeDown(); clearIntent()
+    if not ensureItem(cfg.slots.farmland, { name = cfg.items.farmland }, 1) then
+      return false, "no-farmland"
+    end
+    intent("farmland"); turtle.placeDown(); clearIntent()
     cur = nameBelow()
-    if cur == nil then return false, "place-dirt" end -- placement did not stick
-  end
-  if cur == "minecraft:dirt" or cur == "minecraft:grass_block" then
-    if not ensureHoe() then return false, "no-hoe" end
-    -- Till from the SIDE: a placeDown from this stance (one block ABOVE the dirt)
-    -- can never till because the turtle's own block is the non-air block above
-    -- the dirt (HoeItem.onlyIfAirAbove). tillBelowFromSide steps into a clear
-    -- neighbour, drops beside the dirt, and tills it as the block in front.
-    tillBelowFromSide()
-    cur = nameBelow()
-    -- a broken/vetoed hoe or no clear side leaves the cell un-tilled: halt
-    -- loudly rather than silently reporting an un-tilled cell as done (P0-2)
+    -- placement genuinely failed to stick (an obstruction we couldn't clear, or a
+    -- foreign block left in place): halt loudly rather than report a non-soil cell
+    -- as done (P0-2). Plain farmland or the fertilized variant both count as soil.
     if cur ~= "minecraft:farmland" and cur ~= FERTILIZED_SOIL then
-      return false, "till"
+      return false, "soil"
     end
   end
-  -- only plain farmland is fertilized; an already-fertilized cell is skipped
-  -- (no double-spend) - the load-bearing converge guard (P0-2)
+  -- BEST-EFFORT fertilize: only plain farmland is fertilizable; an already-
+  -- fertilized cell is skipped (no double-spend, the load-bearing converge guard).
+  -- The fertilized variant being uncraftable is FINE - sulfur grows on plain
+  -- farmland - so a missing/failed fertilizer NEVER halts the build.
   if tier == "fertilized" and cur == "minecraft:farmland" then
-    if not ensureItem(cfg.slots.fertilizer, { name = cfg.items.fertilizer }, 1) then
-      return false, "no-fertilizer"
+    if ensureItem(cfg.slots.fertilizer, { name = cfg.items.fertilizer }, 1) then
+      intent("fertilize"); turtle.placeDown(); clearIntent()
+      -- a fertilize that didn't take (FfB fake-player veto, uncraftable variant) is
+      -- tolerated: the cell stays plain farmland and the plot still grows sulfur.
     end
-    intent("fertilize"); turtle.placeDown(); clearIntent()
-    if nameBelow() ~= FERTILIZED_SOIL then return false, "fertilize" end
   end
   return true
 end
@@ -1467,8 +1408,10 @@ local function selfTest()
     S.selftest = "done"; saveJournal()
     return true
   end
-  -- (1) cross-dim AE pull proves the quantum grid merge (Q2)
-  local probe = cfg.base.test_item or cfg.items.dirt
+  -- (1) cross-dim AE pull proves the quantum grid merge (Q2). Probe the build's
+  -- PRIMARY soil pull (farmland) by default, not dirt - the build places farmland,
+  -- and dirt is now only a water sub-floor (an override stays available).
+  local probe = cfg.base.test_item or cfg.items.farmland
   if not restock(cfg.slots.scratch, { name = probe }, 1, 1) then
     return selfTestFail("ME pull failed for " .. probe
       .. " (AE grid merge / spare channel?)")
@@ -1487,34 +1430,29 @@ local function selfTest()
     while ae() <= was and os.clock() < deadline do os.sleep(0.5) end
     if ae() <= was then return selfTestFail("craft request did not complete") end
   end
-  -- (3) build-chain primitives on a scratch column (till/fertilize/plant/water).
-  -- No digging: building tiny persistent scratch structures avoids polluting the
-  -- material slots with dug blocks; a re-run converges (each step skips what is
-  -- already there). The scratch needs floors at sc and the cell one east of sc.
+  -- (3) build-chain primitives on a scratch column (place-farmland/fertilize/plant/
+  -- water). No digging: building tiny persistent scratch structures avoids polluting
+  -- the material slots; a re-run converges (each step skips what is already there).
+  -- The scratch needs floors at sc and the cell one east of sc.
   local sc = cfg.base.scratch
   if sc then
-    -- soil column at (sc.x, sc.z): dirt -> till -> fertilize -> plant
+    -- soil column at (sc.x, sc.z): place farmland -> best-effort fertilize -> plant
     if not navSafe(sc.x, sc.y + 2, sc.z) then return selfTestFail("scratch nav") end
     local cur = belowName()
     if cur == nil then
-      if not ensureItem(cfg.slots.dirt, { name = cfg.items.dirt }, 1) then
-        return selfTestFail("no dirt available")
+      -- PLACE autocrafted farmland directly (no hoe, no till)
+      if not ensureItem(cfg.slots.farmland, { name = cfg.items.farmland }, 1) then
+        return selfTestFail("no farmland available")
       end
-      turtle.select(cfg.slots.dirt); turtle.placeDown(); cur = belowName()
+      turtle.select(cfg.slots.farmland); turtle.placeDown(); cur = belowName()
+      if cur ~= "minecraft:farmland" then return selfTestFail("place farmland") end
     end
-    if cur == "minecraft:dirt" then
-      if not ensureHoe() then return selfTestFail("no hoe available") end
-      -- till from the side: a placeDown from above never tills (the turtle's own
-      -- block is the non-air block above the dirt; HoeItem.onlyIfAirAbove)
-      tillBelowFromSide(); cur = belowName()
-      if cur ~= "minecraft:farmland" then return selfTestFail("till (hoe)") end
-    end
+    -- best-effort fertilize (optional; a miss is fine - sulfur grows on plain farmland)
     if cur == "minecraft:farmland" then
       if ensureItem(cfg.slots.fertilizer, { name = cfg.items.fertilizer }, 1) then
-        turtle.select(cfg.slots.fertilizer); turtle.placeDown(); cur = belowName()
-        if cur ~= "farmingforblockheads:fertilized_farmland_healthy" then
-          return selfTestFail("fertilize (FfB fake-player veto?)")
-        end
+        turtle.select(cfg.slots.fertilizer); turtle.placeDown()
+        local f = belowName()
+        if f == "farmingforblockheads:fertilized_farmland_healthy" then cur = f end
       end
     end
     -- plant on the fertilized farmland (crop one above it)
@@ -1927,10 +1865,9 @@ local function runWizard(plotCount)
   end
   -- The captured height (p.h) MISSES the existing farm's top canopy layer (the
   -- cables sit one above the scanned plot), so a build base at p.ry + p.h lands ON
-  -- that canopy and the first dirt block is buried - the side-till then has no
-  -- clear neighbour to drop beside it and the build halts "till". Start the soil
-  -- layer a clearance gap ABOVE the farm, in clear air. Raise travel_y to match so
-  -- the restock corridor still clears the whole stack.
+  -- that canopy and the turtle can't traverse the layer to reach its stance cells.
+  -- Start the soil layer a clearance gap ABOVE the farm, in clear air. Raise
+  -- travel_y to match so the restock corridor still clears the whole stack.
   local clearance = (cfg and cfg.clearance) or 3
   local buildY = p.ry + p.h + clearance
   print(("farm: starting the stack %d blocks above your farm (clear air)."):format(clearance))
@@ -2212,13 +2149,13 @@ end
 
 -- `farm diag`: the operator's ground-truth capability self-test. A FAST check
 -- (NO ~6-minute plot scan) that exercises EVERY real-world capability the build
--- depends on - AE stock pull, AE craft, place dirt, side-till, fertilize, plant,
--- water - in a CLEAR test column it rises into above the dock, reports PASS/FAIL
--- per capability, then digs up every block it placed so it never damages the
--- operator's farm. The side-till PASS is the load-bearing one: it proves the till
--- works in clear air, so a build halt is geometry (a buried base), not a missing
--- capability. Every step is guarded - a single failure marks FAIL, continues, and
--- the placed blocks are still cleaned up. Safe to run repeatedly.
+-- depends on - AE stock pull, AE craft, PLACE FARMLAND, fertilize, plant, water -
+-- in a CLEAR test column it rises into above the dock, reports PASS/FAIL per
+-- capability, then digs up every block it placed so it never damages the operator's
+-- farm. The PLACE FARMLAND PASS is the load-bearing one: it proves the autocrafted
+-- farmland deploys straight down (no hoe, no till) - which also reaches interior
+-- cells the old side-till could not. Every step is guarded - a single failure marks
+-- FAIL, continues, and the placed blocks are still cleaned up. Safe to run repeatedly.
 if cmd == "diag" then
   -- diag self-tests in a fixed column; it doesn't read a conf's plot geometry, so
   -- synthesize the slot/item defaults if there's no farm.conf yet.
@@ -2351,22 +2288,23 @@ if cmd == "diag" then
     return pullItem(cfg.slots.dirt, cfg.items.dirt, 1), cfg.items.dirt
   end)
 
-  -- AE CRAFT: craft the configured hoe (or report it is already stocked) - reuse
-  -- the 'farm ae' craft-probe shape: a pattern existing is NOT a finished job.
+  -- AE CRAFT: craft the FARMLAND block (the build's autocrafted soil; or report it is
+  -- already stocked) - reuse the 'farm ae' craft-probe shape: a pattern existing is
+  -- NOT a finished job. Farmland is the build's primary autocraft now (no hoe).
   step("AE CRAFT", function()
-    local hoeName = cfg.items.hoe
-    local h0 = bcall("getItem", { name = hoeName })
+    local fName = cfg.items.farmland
+    local h0 = bcall("getItem", { name = fName })
     if type(h0) == "table" and (h0.count or 0) > 0 then
-      return true, hoeName .. " already stocked"
+      return true, fName .. " already stocked"
     end
     if not (type(h0) == "table" and h0.isCraftable) then
-      return false, hoeName .. " neither stocked nor craftable"
+      return false, fName .. " neither stocked nor craftable"
     end
-    bcall("craftItem", { name = hoeName, count = 1 })
+    bcall("craftItem", { name = fName, count = 1 })
     local deadline = os.clock() + (cfg.craft_timeout or 15)
     while os.clock() < deadline do
-      local it = bcall("getItem", { name = hoeName })
-      if it and (it.count or 0) > 0 then return true, "crafted " .. hoeName end
+      local it = bcall("getItem", { name = fName })
+      if it and (it.count or 0) > 0 then return true, "crafted " .. fName end
       os.sleep(0.5)
     end
     return false, "craft STALLED (no free CPU / missing ingredient)"
@@ -2376,11 +2314,12 @@ if cmd == "diag" then
   -- (in-game) / blockAt in the harness: it is reachable ONLY while the turtle sits
   -- at the dock. The moment diag RISES into clear air to test the build primitives,
   -- the bridge is gone, so a pull AFTER the rise fails (the operator's in-game
-  -- SIDE-TILL/FERTILIZE/PLANT/WATER halt). So pull/collect every item the primitive
+  -- PLACE-FARMLAND/FERTILIZE/PLANT/WATER halt). So pull/collect every item the primitive
   -- tests consume INTO its work slot now, while the bridge is still reachable, and
   -- report an "AE PULL: <item>" PASS/FAIL per item (a genuinely missing AE item is
   -- still visible). The rise-and-test steps below NEVER pull; they consume what was
-  -- staged here. Dirt needs 2 (the PLACE DIRT cell + the WATER brace).
+  -- staged here. Farmland needs 1 (the PLACE FARMLAND cell); dirt needs 1 (the WATER
+  -- brace). No hoe is staged - the build no longer tills.
   local seedId = "mysticalagriculture:sulfur_seeds"
   -- SEED ROBUSTNESS (deliverable 4): the id and the _crop->_seeds derivation are
   -- correct; the seed is simply not in AE because the pack disables the crafting-table
@@ -2403,10 +2342,10 @@ if cmd == "diag" then
       return ok, ok and ("staged " .. name) or actionableMiss(name)
     end)
   end
-  stage("dirt", cfg.slots.dirt, cfg.items.dirt, 2)
-  -- the hoe was crafted above; export+collect it into the hoe slot now (a craft
-  -- only puts it in AE - it still has to land in the turtle's fixed hoe slot)
-  stage("hoe", cfg.slots.hoe, cfg.items.hoe, 1)
+  stage("dirt", cfg.slots.dirt, cfg.items.dirt, 1)         -- WATER brace
+  -- the farmland was crafted above; export+collect it into the farmland work slot
+  -- (a craft only puts it in AE - it still has to land in the turtle's work slot)
+  stage("farmland", cfg.slots.farmland, cfg.items.farmland, 1)
   stage("fertilizer", cfg.slots.fertilizer, cfg.items.fertilizer, 1)
   stage("seed", cfg.slots.seed, seedId, 1)
   stage("water", cfg.slots.water, cfg.items.water, 1)
@@ -2452,146 +2391,41 @@ if cmd == "diag" then
     -- the stance, exactly like the build (placeDown). The water column is one east.
     -- Record ABSOLUTE cells (S.pos moves during the run) so cleanup is exact.
     local sx, sz, Ys = S.pos.x, S.pos.z, S.pos.y
-    local soilY = Ys - 1       -- dirt/farmland/fertilized + crop one above (at Ys)
+    local soilY = Ys - 1       -- farmland/fertilized + crop one above (at Ys)
     local function noteAbs(x, y, z) placed[#placed + 1] = { x = x, y = y, z = z } end
 
-    -- PLACE DIRT below the stance and read it back (consumes the staged dirt - the
-    -- bridge is now out of reach, so NO pull here)
-    step("PLACE DIRT", function()
-      turtle.select(cfg.slots.dirt)
-      if turtle.getItemCount(cfg.slots.dirt) < 1 then return false, "no dirt staged" end
+    -- PLACE FARMLAND: the build's new soil primitive. PlaceDown the autocrafted
+    -- farmland block straight into the clear cell below the stance and read it back ==
+    -- minecraft:farmland. This is the WHOLE soil op now (no hoe, no till, no side
+    -- step) - it works on interior cells too, which the old side-till could not reach.
+    -- The placed farmland is LEFT in the main cell so FERTILIZE/PLANT build on it.
+    step("PLACE FARMLAND", function()
+      navTo(sx, Ys, sz)
+      turtle.select(cfg.slots.farmland)
+      if turtle.getItemCount(cfg.slots.farmland) < 1 then
+        return false, "no farmland staged"
+      end
       if not turtle.placeDown() then return false, "placeDown refused" end
       noteAbs(sx, soilY, sz)
       local h, i = turtle.inspectDown()
-      return h and i.name == cfg.items.dirt, "placed " .. tostring(h and i.name)
+      return h and i.name == "minecraft:farmland",
+        "below is " .. tostring(h and i.name)
     end)
 
-    -- TILL PROBE: EMPIRICALLY decide what tills in-game. The source proves CC tills
-    -- via equip + dig/digDown, NOT place()-with-hoe (TurtleTool.java:265-324,
-    -- Turtle_Test.kt:258-273) - but the operator's pack is NeoForge and the source
-    -- can't fully settle a fake-player place() edge, so the probe TRIES each method on
-    -- FRESH dirt in clear air and reports which produced farmland, with the place/dig
-    -- return, the hoe slot count, and the block id after. Each line is formatted
-    -- exactly 'TILL via <m>: PASS/FAIL (hoe xN, ret=BOOL, after=ID)'. The methods that
-    -- FAIL (place/placeDown with the hoe) prove the root cause; the equip+dig methods
-    -- PASS. After the probe the main soil cell is left as farmland (via the working
-    -- method) so FERTILIZE/PLANT continue. Guarded; every probe block is cleaned up.
-    --
-    -- probeOn(name, x,y,z, tryFn): place fresh dirt at (x,y,z), run tryFn() (returns a
-    -- boolean ret = the place/dig call's own return), read the after-id, append the
-    -- formatted line to tillProbe, and return whether it tilled to farmland.
-    local tillProbe = {} -- per-method result lines, rolled up after
-    local hoeOk = turtle.getItemCount(cfg.slots.hoe) >= 1
-    local function freshDirt(x, y, z)
-      navTo(x, y + 1, z) -- stance one above the cell
-      turtle.select(cfg.slots.dirt)
-      if turtle.getItemCount(cfg.slots.dirt) < 1 then return false end
-      if turtle.placeDown() then noteAbs(x, y, z); return true end
-      -- already a (probe) block here? treat a present dirt as fresh
-      local h, i = turtle.inspectDown()
-      return h and i.name == cfg.items.dirt
-    end
-    local function afterId(x, y, z)
-      navTo(x, y + 1, z)
-      local h, i = turtle.inspectDown()
-      return h and i.name or "air"
-    end
-    local function probeOn(name, x, y, z, tryFn, keep)
-      local ret = false
-      if hoeOk and freshDirt(x, y, z) then
-        local ok, r = pcall(tryFn, x, y, z)
-        ret = ok and r and true or false
-      end
-      local after = afterId(x, y, z)
-      local tilled = (after == "minecraft:farmland")
-      tillProbe[#tillProbe + 1] = ("TILL via %s: %s (hoe x%d, ret=%s, after=%s)")
-        :format(name, tilled and "PASS" or "FAIL",
-          turtle.getItemCount(cfg.slots.hoe), tostring(ret), after)
-      -- clean up the probe cell immediately unless it's the MAIN cell we keep tilled
-      -- (so the side probe column never collides with the WATER column at sx+1).
-      if not keep then
-        navTo(x, y + 1, z); turtle.select(cfg.slots.scratch)
-        if turtle.detectDown() then turtle.digDown() end
-      end
-      return tilled
-    end
-
-    step("TILL PROBE", function()
-      if not hoeOk then return false, "no hoe staged" end
-      -- beside(x,y,z, verb): from the stance above fresh dirt, step into a clear
-      -- horizontal neighbour, drop to the dirt's Y, face back toward the dirt, run
-      -- verb() against the dirt IN FRONT, then return to the stance above the cell.
-      -- Returns verb()'s own boolean (or false if there was nowhere to stand).
-      local function beside(x, y, z, verb)
-        navTo(x, y + 1, z)
-        local moved = false
-        for _, dir in ipairs({ "north", "south", "east", "west" }) do
-          faceTo(dir)
-          if not turtle.detect() and goFwd() then
-            if not turtle.detectDown() and goDown() then moved = dir; break end
-            faceTo(OPPD[dir]); goFwd(); faceTo(S.heading) -- back out, try next
-          end
-        end
-        if not moved then return false end
-        faceTo(OPPD[moved]) -- face the dirt (now in front)
-        local r = verb()
-        goUp(); goFwd() -- rise to the stance layer, step back over the cell
-        return r and true or false
-      end
-      -- (a) side-place: face fresh dirt from the side and place() the hoe as the block
-      -- IN FRONT (the old, broken path - expected FAIL, proving the root cause).
-      probeOn("side-place", sx + 1, soilY, sz, function(x, y, z)
-        return beside(x, y, z, function()
-          turtle.select(cfg.slots.hoe); return turtle.place()
-        end)
-      end)
-      -- (b) place-down: from the stance directly above fresh dirt, placeDown() the hoe
-      -- (expected FAIL - the turtle's own block is the non-air above the dirt).
-      probeOn("place-down", sx + 1, soilY, sz, function(x, y, z)
-        navTo(x, y + 1, z); turtle.select(cfg.slots.hoe)
-        return turtle.placeDown()
-      end)
-      -- (c) equip+digDown: equip the hoe, rise one to open the air gap below, digDown
-      -- (the 'one-extra-block below' rule tills the dirt under the gap), descend, swap
-      -- the hoe back. CC's REAL mechanism (expected PASS). Run on the MAIN soil cell so
-      -- the farmland it leaves feeds FERTILIZE/PLANT.
-      local cMain = probeOn("equip+digDown", sx, soilY, sz, function(x, y, z)
-        navTo(x, y + 2, z) -- stance two above the dirt => a one-block air gap below
-        turtle.select(cfg.slots.hoe); turtle.equipLeft()
-        local r = turtle.digDown()
-        turtle.select(cfg.slots.hoe); turtle.equipLeft() -- swap the hoe back
-        return r
-      end, true) -- keep: this is the MAIN cell, leave the farmland for FERTILIZE/PLANT
-      -- (d) equip+dig-side: equip the hoe, step beside FRESH dirt at its Y, face it and
-      -- dig() it as the block in front (the Hoe_dirt gametest - expected PASS).
-      probeOn("equip+dig-side", sx + 1, soilY, sz, function(x, y, z)
-        turtle.select(cfg.slots.hoe); turtle.equipLeft()
-        local r = beside(x, y, z, function() return turtle.dig() end)
-        turtle.select(cfg.slots.hoe); turtle.equipLeft() -- swap the hoe back
-        return r
-      end)
-      -- log every probe line (the operator's definitive in-game record)
-      for _, ln in ipairs(tillProbe) do print("  " .. ln) end
-      -- leave the MAIN soil cell tilled for the downstream steps: if equip+digDown
-      -- didn't take (e.g. a NeoForge quirk), fall back to the side-till builder.
-      navTo(sx, soilY + 1, sz)
-      if afterId(sx, soilY, sz) ~= "minecraft:farmland" then tillBelowFromSide() end
-      local fin = afterId(sx, soilY, sz)
-      -- PASS iff at least one method tilled AND the main cell ended as farmland
-      local anyPass = cMain
-      for _, ln in ipairs(tillProbe) do if ln:find(": PASS", 1, true) then anyPass = true end end
-      return anyPass and fin == "minecraft:farmland",
-        "main cell " .. fin .. " (" .. #tillProbe .. " methods probed)"
-    end)
-
-    -- FERTILIZE -> fertilized_farmland_healthy (consumes the staged fertilizer)
+    -- FERTILIZE -> fertilized_farmland_healthy (consumes the staged fertilizer).
+    -- OPTIONAL in the build (sulfur grows on plain farmland), so a FAIL here is a
+    -- growth-boost miss, not a blocker - the note says so. PASS means the fertilizer
+    -- + fake-player path works in-game.
     step("FERTILIZE", function()
       if turtle.getItemCount(cfg.slots.fertilizer) < 1 then
-        return false, "no fertilizer staged"
+        return false, "OPTIONAL: no fertilizer staged (plain farmland still grows sulfur)"
       end
       turtle.select(cfg.slots.fertilizer); turtle.placeDown()
       local h, i = turtle.inspectDown()
-      return h and i.name == FERTILIZED_SOIL, "below is " .. tostring(h and i.name)
+      local ok = h and i.name == FERTILIZED_SOIL
+      return ok, ok and "fertilized (a growth boost; optional)"
+        or ("OPTIONAL: below is " .. tostring(h and i.name)
+          .. " - plain farmland still grows sulfur")
     end)
 
     -- PLANT a sulfur seed: the crop sits at Ys (the stance) over the farmland at

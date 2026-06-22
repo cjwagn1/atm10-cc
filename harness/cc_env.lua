@@ -1357,6 +1357,23 @@ function Env:essenceFarmlandItem(o)
   }
 end
 
+-- minecraft:farmland as a PLACEABLE BlockItem (the build's new soil primitive).
+-- The fertilized FfB variant is NOT item-placeable, but PLAIN farmland IS - and a
+-- plot of it grows sulfur on its own (MysticalCropBlock.requiresEffectiveFarmland
+-- defaults false), so the builder PLACES this instead of dirt->till. It is autocraft-
+-- able in the operator's AE (a placeable block exactly like dirt). With no onUse hook
+-- it flows through the harness's normal block-place path (so it can't target an
+-- occupied cell, exactly a vanilla BlockItem - the build digs a stray block first
+-- and then places). isFarmland accepts FARMLAND, so a seed plants on it and the
+-- fertilizer (best-effort) upgrades it to the fertilized variant in place.
+function Env:farmlandItem(o)
+  o = o or {}
+  return {
+    id = o.id or FARMLAND, count = o.count or 1,
+    displayName = o.displayName or "Farmland",
+  }
+end
+
 -- MA seed: a BlockItem; plants on a farmland top face -> crop age 0, shrinks 1
 -- (MysticalSeedsItem.java:17 ItemNameBlockItem; FertilizedFarmlandBlock
 -- canSustainPlant unconditional :38). The crop occupies the target air cell

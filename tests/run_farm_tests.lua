@@ -106,7 +106,9 @@ local function buildRig(opts)
   }]]):format(opts.plots or 1)
   env.turtle.inv = {
     [1] = { id = "minecraft:dirt", count = 64 },
-    [2] = env:hoeItem{ durability = 2000 },
+    -- slot 2 is the soil work slot (the freed hoe slot): plain farmland, placed
+    -- directly (no till). The build PLACES this instead of dirt->till.
+    [2] = env:farmlandItem{ count = 64 },
     [3] = env:fertilizerItem{ count = 64 },
     [4] = env:seedItem("mysticalagriculture:sulfur_crop", { count = 64 }),
     [5] = env:waterBucketItem(),
@@ -688,6 +690,7 @@ T("me bridge: exportItem honors the side - only the chest side delivers", functi
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "east", fuel = 100 } }
   local dirt = { id = "minecraft:dirt", count = 64 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   env:addMeBridge("me", { stored = 1, max = 2, usage = 0, items = { dirt },
     deliver = { side = "north", cell = { x = 0, y = 65, z = 0 } } }) -- chest ABOVE
   env.files["prog.lua"] = [[
@@ -766,6 +769,7 @@ T("setup wizard: no config at all -> finds, calibrates, scans, builds a copy", f
   env:addGeoScanner("scanner")
   seedRefPlot(env, 3, 74, 0, 3, 3) -- the operator's plot: 3 east, 6 below (untold)
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 } -- a bare turtle pulls its hoe from AE
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
@@ -773,7 +777,7 @@ T("setup wizard: no config at all -> finds, calibrates, scans, builds a copy", f
   local coal = { id = "minecraft:coal_block", count = 64 }
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
     exportCell = { x = 0, y = 79, z = 0 },
-    items = { dirt, hoe, fert, seed, water, coal } })
+    items = { dirt, farmland, fert, seed, water, coal } })
   current = env
   -- NO farm.conf. Pass the copy count as an arg so the test isn't interactive.
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 40000 })
@@ -804,6 +808,7 @@ T("setup wizard: auto-calibrates the bridge handoff (export side + suck dir)", f
   env:addGeoScanner("scanner")
   seedRefPlot(env, 3, 74, 0, 3, 3)
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
@@ -811,7 +816,7 @@ T("setup wizard: auto-calibrates the bridge handoff (export side + suck dir)", f
   local coal = { id = "minecraft:coal_block", count = 64 }
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
     deliver = { side = "south", cell = { x = 0, y = 81, z = 0 } }, -- chest ABOVE park
-    items = { dirt, hoe, fert, seed, water, coal } })
+    items = { dirt, farmland, fert, seed, water, coal } })
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -880,6 +885,7 @@ T("setup wizard (no scanner): finds the plot on foot and builds a copy", functio
   -- NO geo scanner. Plot crops at y65 (one below the drop), close enough to spiral
   seedRefPlot(env, 1, 64, 0, 3, 3)
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
@@ -887,7 +893,7 @@ T("setup wizard (no scanner): finds the plot on foot and builds a copy", functio
   local coal = { id = "minecraft:coal_block", count = 64 }
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
     exportCell = { x = 0, y = 65, z = 0 }, -- chest directly below the drop (suck down)
-    items = { dirt, hoe, fert, seed, water, coal } })
+    items = { dirt, farmland, fert, seed, water, coal } })
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 120000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -943,6 +949,7 @@ T("setup wizard: a bridge ON the turtle exports straight into it (no chest)", fu
   env:addGeoScanner("scanner")
   seedRefPlot(env, 3, 74, 0, 3, 3)
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
@@ -950,7 +957,7 @@ T("setup wizard: a bridge ON the turtle exports straight into it (no chest)", fu
   local coal = { id = "minecraft:coal_block", count = 64 }
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
     intoTurtle = "north", -- bridge on my north face; export pushes into my inventory
-    items = { dirt, hoe, fert, seed, water, coal } })
+    items = { dirt, farmland, fert, seed, water, coal } })
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -972,6 +979,7 @@ T("setup wizard: calibrates the handoff when AE keeps no stock (crafts a probe)"
   seedRefPlot(env, 3, 74, 0, 3, 3)
   -- everything is craftable but NOTHING is stocked (count 0): an autocraft base
   local dirt = { id = "minecraft:dirt", count = 0, isCraftable = true }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0; hoe.isCraftable = true
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 0 })
@@ -979,7 +987,7 @@ T("setup wizard: calibrates the handoff when AE keeps no stock (crafts a probe)"
   local water = env:waterBucketItem(); water.count = 0; water.isCraftable = true
   local coal = { id = "minecraft:coal_block", count = 0, isCraftable = true }
   env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
-    usage = 0, craftSeconds = 1, items = { dirt, hoe, fert, seed, water, coal } })
+    usage = 0, craftSeconds = 1, items = { dirt, farmland, fert, seed, water, coal } })
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 80000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -990,62 +998,64 @@ T("setup wizard: calibrates the handoff when AE keeps no stock (crafts a probe)"
 end)
 
 -- An AE PATTERN existing (isCraftable=true) does NOT mean the autocraft job can
--- finish - that needs a free ME Crafting CPU + ingredients. The in-game halt was
--- exactly this: diamond_hoe showed craftable, but the job stalled, so the build
--- said "no-hoe". A STOCKED hoe is a sure pull, so prefer it over any craft - and
--- ANY *_hoe tills, so a stocked stone hoe must beat crafting the exact diamond.
-T("supply: a stocked hoe is pulled instead of crafting a stalling diamond one", function()
+-- finish - that needs a free ME Crafting CPU + ingredients. So restock prefers a
+-- STOCKED item over a craftable one (a stocked pull is sure; a craft can stall).
+-- (Was a hoe test before the no-till pivot; now exercised through FARMLAND - the
+-- build's soil primitive - so the prefer-stocked rule keeps its coverage.)
+T("supply: a stocked item is pulled instead of crafting a stalling one", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
     facing = "east", fuel = 90000 } }
   env:addGeoScanner("scanner")
   seedRefPlot(env, 3, 74, 0, 3, 3)
   local dirt = { id = "minecraft:dirt", count = 256 }
-  -- a stocked stone hoe AND a craftable diamond hoe whose job would HANG forever
-  local stone = env:hoeItem{ id = "minecraft:stone_hoe", durability = 131 }
-  stone.count = 4
-  local diamond = env:hoeItem{ durability = 1561 }; diamond.count = 0
-  diamond.isCraftable = true; diamond.craftStalls = true
+  -- farmland is BOTH stocked (a sure pull) AND has a craftable pattern that would
+  -- HANG forever: restock must use the stock, never schedule the stalling craft
+  local farmland = { id = "minecraft:farmland", count = 64,
+    isCraftable = true, craftStalls = true }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
   local water = env:waterBucketItem(); water.count = 16
   local coal = { id = "minecraft:coal_block", count = 64 }
   env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
     usage = 0, craftSeconds = 1,
-    items = { dirt, stone, diamond, fert, seed, water, coal } })
+    items = { dirt, farmland, fert, seed, water, coal } })
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 200000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
-  eq(diamond.count, 0, "never scheduled the stalling diamond-hoe craft")
   eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
-    3, 3, 3, 0), 8, "built using the stocked stone hoe")
+    3, 3, 3, 0), 8, "built using the stocked farmland (no stalling craft)")
 end)
 
--- When the ONLY hoe is a craftable-but-stalling one (no free CPU) and none is
--- stocked, the build can't till. It must halt with an ACTIONABLE message (drop a
--- hoe in the slot / stock one) instead of a bare "no-hoe", and build nothing -
--- not silently leave a half-tilled cell.
-T("supply: a stalling-only hoe halts with an actionable message, builds nothing", function()
-  local env = CC.new{ turtle = { pos = { x = 0, y = 80, z = 0 },
-    facing = "east", fuel = 90000 } }
-  env:addGeoScanner("scanner")
-  seedRefPlot(env, 3, 74, 0, 3, 3)
+-- When the soil block is a craftable-but-stalling pattern (no free CPU) with NONE
+-- stocked, the build can't get farmland. It must halt with an actionable "no-farmland"
+-- strand and build nothing - not silently leave a half-built cell. (Direct build rig
+-- with test_item=dirt so the self-test passes and the build itself hits the stall.)
+T("supply: a stalling-only farmland craft halts no-farmland, builds nothing", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 80000 } }
+  env.files["farm.blueprint"] = BP_PLAIN_SOIL
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 3, h = 1, d = 3 },
+    heading = "east", scan_y = 66,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+    craft_timeout = 1,
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 }, test_item = "minecraft:dirt",
+      staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
+  }]]
   local dirt = { id = "minecraft:dirt", count = 256 }
-  local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0
-  hoe.isCraftable = true; hoe.craftStalls = true
-  local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
-  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
-  local water = env:waterBucketItem(); water.count = 16
-  local coal = { id = "minecraft:coal_block", count = 64 }
-  env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
-    usage = 0, craftSeconds = 1,
-    items = { dirt, hoe, fert, seed, water, coal } })
+  -- farmland only craftable, and the job STALLS; none stocked
+  local farmland = { id = "minecraft:farmland", count = 0,
+    isCraftable = true, craftStalls = true }
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
+    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt, farmland } })
+  env.turtle.inv = {}
   current = env
-  env:run(FARM, { "setup", "1" }, { maxTime = 300000 })
-  local t = env:termText()
-  expectContains(t, "no hoe", "halted on the hoe and said so")
-  expectContains(t, "slot 2", "told the operator which slot to drop a hoe in")
-  eq(countLayer(env, 79, "farmingforblockheads:fertilized_farmland_healthy",
-    3, 3, 3, 0), 0, "built nothing without a hoe (no silent partial)")
+  local res = env:run(FARM, { "build" }, { maxTime = 60000 })
+  eq(res.reason, "done", "run finished (halted, not crashed)")
+  expectContains(env:termText(), "no-farmland", "halted on the un-arriving farmland")
+  eq(countLayer(env, 100, "minecraft:farmland"), 0,
+    "built nothing without farmland (no silent partial)")
 end)
 
 -- THE in-game bug: the wizard scans the plot from above, then homes to its dock
@@ -1061,6 +1071,7 @@ T("setup wizard: homes back over the plot so restock can still reach the bridge"
   env:addGeoScanner("scanner")
   seedRefPlot(env, 3, 63, 0, 3, 3) -- one BELOW the dock + aside: the home descent crosses it
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
@@ -1070,7 +1081,7 @@ T("setup wizard: homes back over the plot so restock can still reach the bridge"
   -- turtle is physically at the dock facing north. A frame offset hides it.
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
     blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6, usage = 0,
-    craftSeconds = 1, items = { dirt, hoe, fert, seed, water, coal } })
+    craftSeconds = 1, items = { dirt, farmland, fert, seed, water, coal } })
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 250000 })
   expectNotContains(env:termText(), "isn't in reach", "got back to the dock + reached the bridge")
@@ -1090,13 +1101,14 @@ T("setup wizard: reads heading even when a step pushes the plot to the range edg
   env:addGeoScanner("scanner")
   seedRefPlot(env, -8, 74, 0, 3, 3) -- plot 8 west: the edge of the free radius-8 scan
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
   local water = env:waterBucketItem(); water.count = 16
   local coal = { id = "minecraft:coal_block", count = 64 }
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
-    intoTurtle = "north", items = { dirt, hoe, fert, seed, water, coal } })
+    intoTurtle = "north", items = { dirt, farmland, fert, seed, water, coal } })
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -1115,6 +1127,7 @@ T("setup wizard: detects an ME Bridge whose type is camelCase 'meBridge'", funct
   env:addGeoScanner("scanner")
   seedRefPlot(env, 3, 74, 0, 3, 3)
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
@@ -1122,7 +1135,7 @@ T("setup wizard: detects an ME Bridge whose type is camelCase 'meBridge'", funct
   local coal = { id = "minecraft:coal_block", count = 64 }
   env:addMeBridge("me", { type = "meBridge", intoTurtle = "north",
     stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
-    items = { dirt, hoe, fert, seed, water, coal } })
+    items = { dirt, farmland, fert, seed, water, coal } })
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 60000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -1163,11 +1176,12 @@ T("setup wizard: centers the stack over a ground-floor ender chest", function()
   end
   env:setBlock(4, 73, 1, { id = "enderstorage:ender_chest" }) -- below, off bbox center
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local coal = { id = "minecraft:coal_block", count = 64 }
   env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
-    usage = 0, craftSeconds = 1, items = { dirt, hoe, fert, coal } })
+    usage = 0, craftSeconds = 1, items = { dirt, farmland, fert, coal } })
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 80000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -1202,6 +1216,7 @@ T("ae: diagnostic reports the grid and proves a real pull", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "east", fuel = 100 } }
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
     usage = 5, items = { dirt } })
   current = env
@@ -1220,6 +1235,7 @@ T("ae: the craft probe names a STALLED autocraft (pattern exists, nothing arrive
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "east", fuel = 100 } }
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0
   hoe.isCraftable = true; hoe.craftStalls = true
   env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
@@ -1235,6 +1251,7 @@ T("ae: the craft probe confirms OK when the AE can finish the craft", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "east", fuel = 100 } }
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0; hoe.isCraftable = true
   env:addMeBridge("me", { intoTurtle = "north", stored = 1e6, max = 2e6,
     usage = 5, craftSeconds = 1, items = { dirt, hoe } })
@@ -1245,15 +1262,12 @@ end)
 
 -- `farm diag` is the operator's ground-truth capability self-test: a FAST check
 -- (no ~6-minute plot scan) that exercises every real-world capability the build
--- depends on - AE stock pull, AE craft, place dirt, a TILL PROBE, fertilize, plant,
--- water - in a CLEAR test column it rises into, reports PASS/FAIL per capability,
--- then cleans up every block it placed so it never damages the operator's farm.
--- The TILL PROBE is the load-bearing one: it EMPIRICALLY tries every tilling method
--- on fresh dirt in clear air and reports which produced farmland, so the operator's
--- next run is DEFINITIVE about what tills in-game. The root cause (place()-with-hoe
--- does NOT till; CC tills via equip + dig/digDown - TurtleTool.java:265-324,
--- Turtle_Test.kt:258-273) is proven by the probe: place/placeDown FAIL, equip+dig
--- methods PASS.
+-- depends on - AE stock pull, AE craft, PLACE FARMLAND, fertilize, plant, water - in
+-- a CLEAR test column it rises into, reports PASS/FAIL per capability, then cleans up
+-- every block it placed so it never damages the operator's farm. PLACE FARMLAND is
+-- the load-bearing one (the no-till pivot): it placeDowns the autocrafted farmland
+-- block straight into a clear cell - no hoe, no till - proving the build's soil
+-- primitive works in-game (and reaches interior cells the old side-till could not).
 T("diag: capability self-test reports every capability PASS and leaves no mess", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "north", fuel = 50000 } }
@@ -1271,13 +1285,15 @@ T("diag: capability self-test reports every capability PASS and leaves no mess",
   -- So any pull AFTER the rise must fail: diag has to stage every item WHILE
   -- DOCKED. This position-gated bridge reproduces the operator's in-game halt.
   local dirt = { id = "minecraft:dirt", count = 256 }
-  local hoe = env:hoeItem{ durability = 1561 }; hoe.count = 0; hoe.isCraftable = true
+  -- farmland is CRAFTABLE (count 0): the AE CRAFT probe must craft it, then staging
+  -- exports+collects it into the farmland work slot (the build's autocrafted soil)
+  local farmland = { id = "minecraft:farmland", count = 0, isCraftable = true }
   local fert = env:fertilizerItem{ count = 64 }
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 64 })
   local water = env:waterBucketItem(); water.count = 16
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
     blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6,
-    usage = 5, craftSeconds = 1, items = { dirt, hoe, fert, seed, water } })
+    usage = 5, craftSeconds = 1, items = { dirt, farmland, fert, seed, water } })
   -- a Geo Scanner with a block in reach so the timed diag SCAN line reports PASS
   env:addGeoScanner("scanner")
   env:setBlock(0, 63, 0, { id = "minecraft:dirt" }) -- one block for the scan to see
@@ -1293,20 +1309,13 @@ T("diag: capability self-test reports every capability PASS and leaves no mess",
   expectContains(log, "geo_scanner", "named the scanner peripheral type")
   expectContains(log, "captureScan3D", "named which capture path would run")
   expectContains(log, "AE STOCK PULL: PASS", "stock pull works")
-  expectContains(log, "AE CRAFT: PASS", "ran the craft probe")
-  expectContains(log, "PLACE DIRT: PASS", "placed dirt in clear air")
-  -- TILL PROBE: empirically tries each method on fresh dirt; the place()-with-hoe
-  -- methods FAIL (the root cause), the equip+dig methods PASS, each reported with the
-  -- ret value, hoe slot count, and the after-id - the operator's definitive in-game proof
-  expectContains(log, "TILL via side-place: FAIL", "place()-with-hoe from the side does NOT till")
-  expectContains(log, "TILL via place-down: FAIL", "placeDown-with-hoe from above does NOT till")
-  expectContains(log, "TILL via equip+digDown: PASS", "equip + digDown tills (CC's real verb)")
-  expectContains(log, "TILL via equip+dig-side: PASS", "equip + dig from the side tills")
-  -- each probe line carries the detail format: (hoe xN, ret=BOOL, after=ID)
-  expectContains(log, "after=minecraft:farmland", "a working method reports farmland after")
-  expectContains(log, "ret=", "each probe line reports the place/dig return value")
-  expectContains(log, "TILL PROBE: PASS", "the rolled-up probe verdict is PASS (some method worked)")
-  expectContains(log, "FERTILIZE: PASS", "fertilized the farmland")
+  expectContains(log, "AE CRAFT: PASS", "ran the farmland craft probe")
+  -- PLACE FARMLAND: the build's new soil primitive. PlaceDown the autocrafted
+  -- farmland straight down (no hoe, no till) and read it back == minecraft:farmland.
+  expectContains(log, "PLACE FARMLAND: PASS", "placed autocrafted farmland in clear air")
+  -- the no-till pivot: the old TILL PROBE is gone entirely
+  expectNotContains(log, "TILL", "no till probe - the build places farmland, never tills")
+  expectContains(log, "FERTILIZE: PASS", "fertilized the farmland (optional growth boost)")
   expectContains(log, "PLANT: PASS", "planted a sulfur seed")
   expectContains(log, "WATER: PASS", "placed a water source with a brace")
   expectContains(log, "CLEAN UP: PASS", "cleaned up every test block")
@@ -1346,6 +1355,7 @@ T("diag: the SCAN line reports PASS, the block count, and the scanner type", fun
     build = { x = 0, y = 0, z = 0 }, plots = 1, fleet = "farm1",
   }]]
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
     blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6,
     usage = 5, items = { dirt } })
@@ -1385,6 +1395,7 @@ T("diag: the SCAN line FAILs and names the probe path when no scanner is present
     build = { x = 0, y = 0, z = 0 }, plots = 1, fleet = "farm1",
   }]]
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
     blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6,
     usage = 5, items = { dirt } })
@@ -1415,6 +1426,7 @@ T("diag: a missing sulfur seed reports an actionable 'stock seeds' message", fun
   }]]
   -- a full AE EXCEPT the sulfur seed (the operator's exact stock gap)
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }
   local fert = env:fertilizerItem{ count = 64 }
   local water = env:waterBucketItem(); water.count = 16
@@ -1448,6 +1460,7 @@ T("diag: a craftable sulfur seed is auto-crafted and staged (no bare FAIL)", fun
     build = { x = 0, y = 0, z = 0 }, plots = 1, fleet = "farm1",
   }]]
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 1561 }
   local fert = env:fertilizerItem{ count = 64 }
   local water = env:waterBucketItem(); water.count = 16
@@ -2058,7 +2071,7 @@ local function clearanceRig(clearance, blueprint)
   }]]):format(oy, h, oy + h + 1, buildY, clearance)
   env.turtle.inv = {
     [1] = { id = "minecraft:dirt", count = 64 },
-    [2] = env:hoeItem{ durability = 2000 },
+    [2] = env:farmlandItem{ count = 64 },
     [3] = env:fertilizerItem{ count = 64 },
     [4] = env:seedItem("mysticalagriculture:sulfur_crop", { count = 64 }),
     [5] = env:waterBucketItem(),
@@ -2071,24 +2084,33 @@ local function clearanceRig(clearance, blueprint)
   return env, buildY
 end
 
--- RED-proves the bug: with clearance 0 the build base lands on the canopy level
--- and the side-till has no clear neighbour to drop beside the dirt -> halts "till".
-T("clearance: build base buried in the canopy halts the till (no clear side)", function()
-  local env = clearanceRig(0)
+-- PIVOT (operator decision): the build no longer TILLS - it PLACES autocrafted
+-- minecraft:farmland directly, like placing dirt. A farmland BlockItem deploys from
+-- the stance ABOVE the cell (placeDown) with NO clear horizontal neighbour and no
+-- air-above gate, so the OLD side-till's no-clear-neighbour halt is GONE. A single
+-- cell whose four horizontal neighbours are ALL canopy (the side-till could never
+-- step into one to drop beside the dirt) now builds: placeDown reaches it straight
+-- down. (A 1x1 footprint so the canopy sits entirely OUTSIDE it, flush on all sides.)
+T("clearance: a cell ringed by flush canopy STILL builds (place-farmland, no side-till)", function()
+  local env = clearanceRig(0, "return {\n  size = { w = 1, h = 1, d = 1 },\n"
+    .. "  cells = {\n    [\"0,0,0\"] = { kind = \"soil\", tier = \"fertilized\" },\n"
+    .. "  },\n}\n")
+  -- the single build cell at (0,66,0) has all four horizontal neighbours filled with
+  -- canopy at BOTH the soil and stance layers (surroundColumnWithCanopy at oy+h=66) -
+  -- the exact geometry the side-till halted on. placeDown straight down still works.
   current = env
   local res = env:run(FARM, { "build" }, { maxTime = 9000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
-  expectContains(env:termText(), "halted", "the buried build halts loudly")
-  expectContains(env:termText(), "till", "it halts on the side-till (no clear neighbour)")
-  -- and it built NO soil layer (the very first cell could not be tilled)
-  eq(countLayer(env, 64 + 2, "farmingforblockheads:fertilized_farmland_healthy"),
-    0, "no soil fertilized - the build never got past the first buried cell")
+  expectNotContains(env:termText(), "halted", "place-farmland does not halt on a ringed cell")
+  expectNotContains(env:termText(), "till", "the build no longer tills (no till halt possible)")
+  eq(env:block(0, 66, 0) and env:block(0, 66, 0).id,
+    "farmingforblockheads:fertilized_farmland_healthy",
+    "the ringed cell built (placeDown, no clear neighbour needed)")
 end)
 
--- GREEN: with the default clearance the wizard's formula lifts the base ABOVE the
--- canopy into clear air, so the same canopy does not block the side-till and the
--- soil layer builds.
-T("clearance: the default gap lifts the base into clear air and the soil builds", function()
+-- The default clearance still lifts the base into clear air; the soil builds either
+-- way now, so this just pins the clear-air path stays green post-pivot.
+T("clearance: the default gap also builds the soil (place-farmland)", function()
   local env, buildY = clearanceRig(3)
   current = env
   local res = env:run(FARM, { "build" }, { maxTime = 9000 })
@@ -2096,6 +2118,171 @@ T("clearance: the default gap lifts the base into clear air and the soil builds"
   expectNotContains(env:termText(), "halted", "the clear-air build does not halt")
   eq(countLayer(env, buildY, "farmingforblockheads:fertilized_farmland_healthy"),
     9, "all 9 soil cells fertilized in clear air above the canopy")
+end)
+
+-- ---------------------------------------- PLACE-FARMLAND doSoil (the pivot)
+-- The build PLACES autocrafted minecraft:farmland directly (no hoe, no till). These
+-- pin the new doSoil: places farmland onto an empty cell; converge no-op over an
+-- existing farmland/fertilized cell; best-effort fertilize that NEVER halts; and the
+-- interior-cell win the side-till could never reach.
+
+-- A plain (non-fertilized) plot proves the bare place: every cell ends as
+-- minecraft:farmland, no fertilizer touched (tier=plain).
+T("doSoil: places plain farmland directly - no hoe, no till", function()
+  local env = buildRig{ blueprint = BP_PLAIN_SOIL }
+  env.turtle.inv[3] = nil -- no fertilizer needed for a plain plot
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 6000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(countLayer(env, 100, "minecraft:farmland"), 9,
+    "all 9 cells are plain farmland, placed (not tilled)")
+end)
+
+-- A fully-INTERIOR cell (one the old side-till could never reach: every horizontal
+-- neighbour is occupied by built soil) builds because placeDown needs no neighbour.
+-- A 3x3 plain plot's centre cell (1,0,1) is interior once the ring is laid.
+T("doSoil: builds the INTERIOR cell the side-till could never reach", function()
+  local env = buildRig{ blueprint = BP_PLAIN_SOIL }
+  env.turtle.inv[3] = nil
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 6000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  -- the centre (interior) cell is farmland, not air/dirt - the place reached it
+  eq(env:block(1, 100, 1) and env:block(1, 100, 1).id, "minecraft:farmland",
+    "the interior centre cell built (placeDown, no side neighbour needed)")
+end)
+
+-- Best-effort fertilize: a fertilized-tier plot WITH the fertilizer available
+-- upgrades plain farmland to the fertilized variant in place.
+T("doSoil: best-effort fertilize upgrades plain farmland when the fertilizer is available", function()
+  local env = buildRig{ blueprint = BP_PLAIN_SOIL:gsub("plain", "fertilized") }
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 6000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(countLayer(env, 100, "farmingforblockheads:fertilized_farmland_healthy"), 9,
+    "all 9 plain-farmland cells were best-effort upgraded to fertilized")
+end)
+
+-- Best-effort fertilize NEVER halts: a fertilized-tier plot with NO fertilizer (none
+-- stocked, none craftable) still completes - the cells stay PLAIN farmland (which
+-- grows sulfur fine). The fertilized variant being unobtainable is not a blocker.
+T("doSoil: fertilize is best-effort - no fertilizer still completes on plain farmland", function()
+  local env = buildRig{ blueprint = BP_PLAIN_SOIL:gsub("plain", "fertilized") }
+  env.turtle.inv[3] = nil -- NO fertilizer anywhere (no AE either)
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 6000 })
+  eq(res.reason, "done", "run reason - the build completes without fertilizer")
+  expectNotContains(env:termText(), "halted", "missing fertilizer never halts")
+  expectNotContains(env:termText(), "no-fertilizer", "no fertilizer strand")
+  eq(countLayer(env, 100, "minecraft:farmland"), 9,
+    "cells stay plain farmland (sulfur grows on plain farmland)")
+end)
+
+-- Converge no-op: a re-run over already-fertilized soil must place NO farmland and
+-- spend NO fertilizer (the load-bearing idempotency for kill-resume).
+T("doSoil: a converge RE-WALK over fertilized soil places no farmland and spends nothing", function()
+  local env = buildRig{ blueprint = BP_PLAIN_SOIL:gsub("plain", "fertilized") }
+  current = env
+  local first = env:run(FARM, { "build" }, { maxTime = 6000 })
+  eq(first.reason, "done", "first build (err=" .. tostring(first.err) .. ")")
+  -- A successful build DELETES its journal (farm.lua), so a plain re-run is FRESH:
+  -- skipBuiltPlots sees plot 0 complete and the cell loop never runs, so doSoil is
+  -- never re-entered (the old test passed even with the converge guard removed).
+  -- Plant a RESUME journal at plot 0 so the build re-walks every already-fertilized
+  -- cell THROUGH doSoil's converge guard - the only path that actually exercises it.
+  -- selftest=done skips the self-test gate so it spends nothing of its own.
+  env.files["farm.journal"] =
+    "phase=build\nplot=0\ndy=0\npos=0,120,0\nheading=east\nselftest=done\n"
+  env.turtle.pos = { x = 0, y = 120, z = 0 }; env.turtle.facing = "east"
+  local farmBefore = env.turtle.inv[2] and env.turtle.inv[2].count
+  local fertBefore = env.turtle.inv[3] and env.turtle.inv[3].count
+  env:run(FARM, { "build" }, { maxTime = 6000 })
+  -- The converge re-walk must COMPLETE, not halt: a successful build deletes its
+  -- journal, so a cleared journal proves all 9 cells re-walked without a 'soil'
+  -- halt. (res.reason is "done" even on a halt - the program prints + returns - so
+  -- the journal, not the reason, is the completion signal.)
+  eq(env.files["farm.journal"], nil,
+    "the converge re-walk COMPLETED (journal cleared, no halt)")
+  -- Every cell stays its ORIGINAL fertilized block: the converge guard never
+  -- dug+replaced it (a broken guard re-places plain farmland over the fertilized
+  -- cell, which this catches), so nothing was spent either.
+  for dx = 0, 2 do
+    for dz = 0, 2 do
+      local b = env:block(dx, 100, dz)
+      eq(b and b.id, "farmingforblockheads:fertilized_farmland_healthy",
+        ("cell %d,%d untouched by the converge re-walk"):format(dx, dz))
+    end
+  end
+  eq(env.turtle.inv[2] and env.turtle.inv[2].count, farmBefore,
+    "no farmland consumed on the converge re-walk")
+  eq(env.turtle.inv[3] and env.turtle.inv[3].count, fertBefore,
+    "no fertilizer consumed on the converge re-walk")
+end)
+
+-- doSoil clears a stray foreign block (a leftover dirt from a failed run) and places
+-- farmland over it, so a converge re-run heals the cell instead of halting.
+T("doSoil: a stray dirt block is cleared and replaced with farmland", function()
+  local env = buildRig{ blueprint = BP_PLAIN_SOIL }
+  env.turtle.inv[3] = nil
+  env:setBlock(1, 100, 1, { id = "minecraft:dirt" }) -- a stray block in a soil cell
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 6000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(env:block(1, 100, 1) and env:block(1, 100, 1).id, "minecraft:farmland",
+    "the stray dirt was cleared and farmland placed in its stead")
+end)
+
+-- The build no longer EQUIPS a hoe at all: a plain-soil build with NO hoe anywhere
+-- (no slot hoe, no AE hoe) still completes. Proves the hoe dependency is gone.
+T("doSoil: builds with NO hoe available anywhere (hoe dependency removed)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 80000 } }
+  env.files["farm.blueprint"] = BP_PLAIN_SOIL
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 3, h = 1, d = 3 },
+    heading = "east", scan_y = 66,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
+      staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
+  }]]
+  -- AE stocks FARMLAND (autocraftable, like dirt); NO hoe anywhere
+  local farmland = { id = "minecraft:farmland", count = 256 }
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0,
+    exportCell = { x = 0, y = 115, z = -2 }, items = { farmland } })
+  env.turtle.inv = {} -- nothing, not even a hoe
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 10000 })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  expectNotContains(env:termText(), "no-hoe", "the build never needs a hoe")
+  eq(countLayer(env, 100, "minecraft:farmland"), 9,
+    "all 9 cells built from autocrafted farmland, no hoe required")
+end)
+
+-- doSoil halts 'no-farmland' only when farmland is genuinely unobtainable (not
+-- stocked AND not craftable) - an actionable, distinct strand.
+T("doSoil: an unobtainable farmland block halts no-farmland (genuinely missing)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
+    facing = "east", fuel = 80000 } }
+  env.files["farm.blueprint"] = BP_PLAIN_SOIL
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 64, z = 0 }, size = { w = 3, h = 1, d = 3 },
+    heading = "east", scan_y = 66,
+    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
+    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 }, test_item = "minecraft:dirt",
+      staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
+  }]]
+  -- AE has dirt (so the self-test ME-pull probe passes) but NEITHER farmland stocked
+  -- NOR a craft pattern for it - so the build itself halts on the missing soil block
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0,
+    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt } })
+  env.turtle.inv = {}
+  current = env
+  local res = env:run(FARM, { "build" }, { maxTime = 10000 })
+  eq(res.reason, "done", "run finished (halted, not crashed)")
+  expectContains(env:termText(), "no-farmland", "halts on genuinely missing farmland")
 end)
 
 -- A captured farm includes infrastructure blocks the turtle can't reproduce: an
@@ -2134,12 +2321,13 @@ T("build: pulls an NBT-keyed block (frequency ender chest) by fingerprint", func
       staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
   }]]
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   -- in AE but ONLY matchable by fingerprint (frequency NBT), not by name
   local chest = { id = "enderstorage:ender_chest", count = 8,
     fingerprint = "ender_chest:white/white/white", nbtKeyed = true }
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0,
-    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt, chest } })
-  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
+    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt, farmland, chest } })
+  env.turtle.inv = {} -- empty: slot 2 is the farmland work slot, pulled from AE
   current = env
   local res = env:run(FARM, { "build" }, { maxTime = 8000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -2161,9 +2349,10 @@ T("build: an un-obtainable infrastructure block is skipped, not a fatal halt", f
       staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
   }]]
   local dirt = { id = "minecraft:dirt", count = 256 } -- AE has dirt, NOT the chest
+  local farmland = { id = "minecraft:farmland", count = 256 }
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0,
-    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt } })
-  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
+    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt, farmland } })
+  env.turtle.inv = {} -- empty: slot 2 is the farmland work slot, pulled from AE
   current = env
   local res = env:run(FARM, { "build" }, { maxTime = 8000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -2196,7 +2385,10 @@ local function supplyRig(opts)
     base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
       staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
   }]]):format(opts.plots or 1)
+  -- the build PLACES autocrafted farmland (no till), so AE stocks FARMLAND (and a
+  -- dirt for water sub-floors). Fertilizer is crafted on demand. No hoe needed.
   local dirt = { id = "minecraft:dirt", count = 256, isCraftable = false }
+  local farmland = { id = "minecraft:farmland", count = 256, isCraftable = false }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
   seed.isCraftable = false
@@ -2204,8 +2396,8 @@ local function supplyRig(opts)
   local coal = { id = "minecraft:coal_block", count = 64, isCraftable = false }
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
     exportCell = { x = 0, y = 115, z = -2 },
-    items = { dirt, fert, seed, water, coal } })
-  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } } -- only a hoe
+    items = { dirt, farmland, fert, seed, water, coal } })
+  env.turtle.inv = {} -- empty: the build pulls everything (incl. farmland) from AE
   env._fert = fert -- expose for assertions
   return env
 end
@@ -2263,6 +2455,7 @@ T("supply: water over a fluid brace cell clears it and lays a sub-floor (no dry 
   -- the brace cell directly below the water target is a FLUID, not air or solid
   env:setBlock(0, 99, 0, { id = "minecraft:water", state = { level = 1 } })
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local water = env:waterBucketItem(); water.count = 16; water.isCraftable = false
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "south",
     stored = 1e6, max = 2e6, usage = 0, items = { dirt, water } })
@@ -2294,10 +2487,11 @@ T("supply: pulls from a bridge it can only read while FACING it", function()
       suck = "self", export_side = "north", bridge_facing = "south" },
   }]]
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   -- the turtle can ONLY read this bridge while facing south
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "south",
-    stored = 1e6, max = 2e6, usage = 0, items = { dirt } })
-  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
+    stored = 1e6, max = 2e6, usage = 0, items = { dirt, farmland } })
+  env.turtle.inv = {} -- empty: slot 2 is the farmland work slot, pulled from AE
   current = env
   local res = env:run(FARM, { "build" }, { maxTime = 10000 })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
@@ -2305,61 +2499,10 @@ T("supply: pulls from a bridge it can only read while FACING it", function()
     "tilled all 9 - it turned to face the bridge before each pull")
 end)
 
--- ANY hoe tills, so the builder must not insist on a diamond hoe specifically -
--- the operator's exact diamond hoe may have no encoded AE autocraft pattern even
--- though they can craft it by hand. If another hoe is stocked or craftable, use
--- it. (operator hit "no-hoe" with a diamond hoe they said was craftable.)
-T("supply: uses any craftable hoe when the configured one has no AE pattern", function()
-  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
-    facing = "east", fuel = 80000 } }
-  env.files["farm.blueprint"] = BP_PLAIN_SOIL
-  env.files["farm.conf"] = [[return {
-    origin = { x = 0, y = 64, z = 0 }, size = { w = 3, h = 1, d = 3 },
-    heading = "east", scan_y = 66,
-    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
-    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
-    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
-      staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
-  }]]
-  local dirt = { id = "minecraft:dirt", count = 256 }
-  -- the default diamond hoe is NOT in the grid; a netherite hoe IS craftable
-  local nhoe = env:hoeItem{ id = "minecraft:netherite_hoe", durability = 2031 }
-  nhoe.count = 0; nhoe.isCraftable = true
-  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
-    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt, nhoe } })
-  env.turtle.inv = {} -- no hoe to start - it must pull one from AE
-  current = env
-  local res = env:run(FARM, { "build" }, { maxTime = 12000 })
-  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
-  eq(countLayer(env, 100, "minecraft:farmland"), 9,
-    "tilled all 9 with a substitute hoe (no diamond-hoe pattern needed)")
-end)
-
-T("supply: a worn hoe is swapped for a fresh one (no silent un-tilled cells)", function()
-  -- only dirt+hoe needed (plain soil). Start with a near-broken hoe (1 use
-  -- left, 9 cells to till) and stock a fresh hoe in AE. Without the swap the
-  -- hoe breaks and later cells stay un-tilled while the build reports done.
-  local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
-    facing = "east", fuel = 80000 } }
-  env.files["farm.blueprint"] = BP_PLAIN_SOIL
-  env.files["farm.conf"] = [[return {
-    origin = { x = 0, y = 64, z = 0 }, size = { w = 3, h = 1, d = 3 },
-    heading = "east", lateral = "south", scan_y = 66,
-    start = { x = 0, y = 120, z = 0 }, start_heading = "east",
-    build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
-    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
-      staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
-  }]]
-  local dirt = { id = "minecraft:dirt", count = 256 }
-  local freshHoe = env:hoeItem{ durability = 1561 }
-  env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0,
-    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt, freshHoe } })
-  env.turtle.inv = { [2] = env:hoeItem{ durability = 1561, damage = 1559 } }
-  current = env
-  local res = env:run(FARM, { "build" }, { maxTime = 12000 })
-  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
-  eq(countLayer(env, 100, "minecraft:farmland"), 9, "all 9 cells tilled")
-end)
+-- (Removed two hoe-substitution tests - "uses any craftable hoe" and "a worn hoe is
+-- swapped" - obsolete after the no-till pivot: the build PLACES autocrafted farmland
+-- and never equips, pulls, or wears a hoe. The restock prefer-stocked / stall-halt
+-- behaviour they exercised now has coverage through the FARMLAND supply tests above.)
 
 T("supply: a craft was actually issued for the out-of-stock fertilizer", function()
   local env = supplyRig()
@@ -2433,14 +2576,15 @@ local function navCeilRig(opts)
       staging = { x = 0, y = %d, z = -2 }, suck = "down", export_side = "up" },
   }]]):format(buildY, buildY, plots, travelY, clr, buildY, buildY - 1)
   local dirt = { id = "minecraft:dirt", count = 256, isCraftable = false }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
   seed.isCraftable = false
   local water = env:waterBucketItem(); water.count = 16; water.isCraftable = false
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
     exportCell = { x = 0, y = buildY - 1, z = -2 },
-    items = { dirt, fert, seed, water } })
-  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } } -- only a hoe; work slots empty -> restock on plot 0
+    items = { dirt, farmland, fert, seed, water } })
+  env.turtle.inv = {} -- empty: the build pulls farmland + everything from AE
   if opts.ceilBlock then
     -- a ceiling block in the build column ABOVE builtCeil but BELOW travel_y: only
     -- the old over-climb (to travel_y) hits it.
@@ -2526,14 +2670,15 @@ local function selftestRig(opts)
   env:setBlock(6, 118, 0, { id = "minecraft:stone" }) -- scratch soil-column floor
   env:setBlock(7, 118, 0, { id = "minecraft:stone" }) -- scratch water-column floor
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
   local water = env:waterBucketItem(); water.count = 16
   local coal = { id = "minecraft:coal_block", count = 64 }
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
     exportCell = { x = 0, y = 125, z = -2 },
-    items = { dirt, fert, seed, water, coal } })
-  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
+    items = { dirt, farmland, fert, seed, water, coal } })
+  env.turtle.inv = {} -- empty: slot 2 is now the farmland work slot, no hoe stocked
   return env
 end
 
@@ -2600,9 +2745,10 @@ T("kill-resume: mid-build kills resume to a correct plot, no double-spend", func
 end)
 
 T("kill-resume: recovers a stranded AE export instead of double-pulling", function()
-  -- only dirt is needed (plain soil). Strand 64 dirt on the staging cell (as if
-  -- a kill struck between export and suck) and DRAIN AE dirt to 0, so the build
-  -- can only finish by collecting the stranded stack - never by re-exporting.
+  -- only farmland is needed (plain soil, placed not tilled). Strand 64 farmland on
+  -- the staging cell (as if a kill struck between export and suck) and DRAIN AE
+  -- farmland to 0, so the build can only finish by collecting the stranded stack -
+  -- never by re-exporting.
   local env = CC.new{ turtle = { pos = { x = 0, y = 120, z = 0 },
     facing = "east", fuel = 80000 } }
   env.files["farm.blueprint"] = BP_PLAIN_SOIL
@@ -2611,14 +2757,14 @@ T("kill-resume: recovers a stranded AE export instead of double-pulling", functi
     heading = "east", lateral = "south", scan_y = 66,
     start = { x = 0, y = 120, z = 0 }, start_heading = "east",
     build = { x = 0, y = 100, z = 0 }, plots = 1, fleet = "farm1", travel_y = 116,
-    base = { bridge = "me", park = { x = 0, y = 116, z = -2 },
+    base = { bridge = "me", park = { x = 0, y = 116, z = -2 }, test_item = "minecraft:farmland",
       staging = { x = 0, y = 115, z = -2 }, suck = "down", export_side = "up" },
   }]]
-  local dirt = { id = "minecraft:dirt", count = 0 }  -- AE empty
+  local farmland = { id = "minecraft:farmland", count = 0 }  -- AE empty
   env:addMeBridge("me", { stored = 1e6, max = 2e6, usage = 0,
-    exportCell = { x = 0, y = 115, z = -2 }, items = { dirt } })
-  env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
-  env.ground["0,115,-2"] = { { id = "minecraft:dirt", count = 64 } } -- stranded
+    exportCell = { x = 0, y = 115, z = -2 }, items = { farmland } })
+  env.turtle.inv = {} -- empty: slot 2 is the farmland work slot, pulled from AE
+  env.ground["0,115,-2"] = { { id = "minecraft:farmland", count = 64 } } -- stranded
   -- resume scenario: a kill struck between export and suck during the build;
   -- the journal says build in progress + self-test already done (so it is not
   -- re-run and does not collect the stranded stack first)
@@ -2628,8 +2774,8 @@ T("kill-resume: recovers a stranded AE export instead of double-pulling", functi
   local res = env:run(FARM, {}, { maxTime = 9000 })  -- no-arg = resume
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
   eq(countLayer(env, 100, "minecraft:farmland"), 9,
-    "plot finished from the recovered stranded dirt (AE was empty)")
-  eq(dirt.count, 0, "AE dirt never re-exported (no double-pull)")
+    "plot finished from the recovered stranded farmland (AE was empty)")
+  eq(farmland.count, 0, "AE farmland never re-exported (no double-pull)")
 end)
 
 -- fix #4: a kill striking AFTER a water source materialized but BEFORE the spent
@@ -2705,9 +2851,10 @@ T("kill-resume: a kill while faced at the bridge (no bridge_facing) resumes squa
         suck = "self", export_side = "north" },
     }]]
     local dirt = { id = "minecraft:dirt", count = 256 }
+    local farmland = { id = "minecraft:farmland", count = 256 }
     env:addMeBridge("me", { intoTurtle = "north", whenFacing = "south",
-      stored = 1e6, max = 2e6, usage = 0, items = { dirt } })
-    env.turtle.inv = { [2] = env:hoeItem{ durability = 2000 } }
+      stored = 1e6, max = 2e6, usage = 0, items = { dirt, farmland } })
+    env.turtle.inv = {} -- empty: slot 2 is the farmland work slot, pulled from AE
     return env
   end
   -- t=27 lands the kill while parked at the park (y116) having just raw-turned
@@ -2817,6 +2964,7 @@ T("supply: park inside the build footprint never strands the build as no-seed", 
       suck = "self", export_side = "north", bridge_facing = "north" },
   }]]
   local dirt = { id = "minecraft:dirt", count = 256 }
+  local farmland = { id = "minecraft:farmland", count = 256 }
   local hoe = env:hoeItem{ durability = 2000 }; hoe.count = 0; hoe.isCraftable = true
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 256 })
@@ -2824,7 +2972,7 @@ T("supply: park inside the build footprint never strands the build as no-seed", 
   local water = env:waterBucketItem(); water.count = 16; water.isCraftable = false
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
     stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
-    items = { dirt, hoe, fert, seed, water } })
+    items = { dirt, farmland, fert, seed, water } })
   env.turtle.inv = {}
   current = env
   local res = env:run(FARM, { "build" }, { maxTime = 60000 })
@@ -2846,6 +2994,7 @@ T("setup: wizard keeps the park off the build stack (ender-centred, on-turtle br
   env:setBlock(0, 76, 0, { id = "enderstorage:ender_chest" }) -- ground-floor anchor
   env:addGeoScanner("scanner")
   local dirt = { id = "minecraft:dirt", count = 2554 }
+  local farmland = { id = "minecraft:farmland", count = 2554 }
   local hoe = env:hoeItem{ durability = 2000 }; hoe.count = 0; hoe.isCraftable = true
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 0 })
@@ -2855,7 +3004,7 @@ T("setup: wizard keeps the park off the build stack (ender-centred, on-turtle br
     fingerprint = "ender#wWw" }
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
     stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
-    items = { dirt, hoe, fert, seed, water, ender } })
+    items = { dirt, farmland, fert, seed, water, ender } })
   env.turtle.inv = {}
   current = env
   local res = env:run(FARM, { "setup", "1" }, { maxTime = 120000 })
@@ -2890,6 +3039,7 @@ T("e2e: operator scenario - on-turtle bridge, autocraft AE, canopy plot, ender-c
   -- the facing-gated, into-turtle bridge: autocraft hoe/fert/seed, dirt STOCKED,
   -- a fingerprint-keyed ender chest pulled by fingerprint, canopy blocks present
   local dirt = { id = "minecraft:dirt", count = 2554 }
+  local farmland = { id = "minecraft:farmland", count = 2554 }
   local hoe = env:hoeItem{ durability = 2000 }; hoe.count = 0; hoe.isCraftable = true
   local fert = env:fertilizerItem{ count = 0 }; fert.isCraftable = true
   local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 0 })
@@ -2902,7 +3052,7 @@ T("e2e: operator scenario - on-turtle bridge, autocraft AE, canopy plot, ender-c
     fingerprint = "ender#wWw" }
   env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
     stored = 1e6, max = 2e6, usage = 0, craftSeconds = 1,
-    items = { dirt, hoe, fert, seed, water, coal, accel, cable, ender } })
+    items = { dirt, farmland, fert, seed, water, coal, accel, cable, ender } })
   env.turtle.inv = {}
   current = env
 
@@ -2954,17 +3104,22 @@ T("e2e: operator scenario - on-turtle bridge, autocraft AE, canopy plot, ender-c
     -- centre water (a source) in BOTH copies
     eq(env:block(px0 + 8, soilY, pz0 + 3).id, "minecraft:water",
       "plot " .. plot .. " centre water source")
-    -- the bulk canopy accelerators are pulled+placed in BOTH copies (the ender
-    -- chest + cable are NBT/frequency-keyed harvest infrastructure the builder
-    -- skips by design - "place these yourself" - so they are not asserted placed)
+    -- the bulk canopy accelerators are pulled+placed in BOTH copies. The
+    -- fingerprint-keyed ender chest IS in AE, so the builder pulls it BY FINGERPRINT
+    -- and places it (the operator re-keys it after) - the same fingerprint-pull the
+    -- dedicated NBT test pins. (A truly un-obtainable infra block is skipped loudly;
+    -- that path is covered by the "un-obtainable infrastructure block is skipped" test.)
     if countLayer(env, canopyY, "mysticalagriculture:essence_farmland",
       17, 6, px0, pz0) < 80 then
       fail("plot " .. plot .. " canopy accelerators missing")
     end
+    -- the fingerprint-keyed ender chest is replicated at the canopy centre column
+    eq(env:block(px0 + 8, canopyY, pz0 + 3) and env:block(px0 + 8, canopyY, pz0 + 3).id,
+      "enderstorage:ender_chest", "plot " .. plot .. " ender chest pulled by fingerprint")
   end
-  -- the keyed harvest infrastructure was skipped LOUDLY (design: external harvest)
-  expectContains(env:termText(), "skipping enderstorage:ender_chest",
-    "the fingerprint-keyed ender chest is skipped loudly, not silently")
+  -- the build did NOT halt on the keyed ender chest - it pulled it by fingerprint
+  expectNotContains(env:termText(), "skipping enderstorage:ender_chest",
+    "the fingerprint-keyed ender chest is pulled, not skipped")
 
   -- ----- PHASE 2: resume after a PARTIAL build (must NOT mis-skip) -----
   -- fresh-run state: drop the journal so skipBuiltPlots runs; keep conf+blueprint
