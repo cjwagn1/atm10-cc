@@ -1430,8 +1430,39 @@ T("diag: a missing sulfur seed reports an actionable 'stock seeds' message", fun
   expectContains(log, "AE PULL: seed: FAIL", "the seed pull FAILs (genuinely absent)")
   -- the actionable guidance, not a bare 'no <id> from AE'
   expectContains(log, "stock", "tells the operator to stock the seed")
-  expectContains(log, "Seed Infusion Altar", "names where seeds come from (the pack disables crafting)")
-  expectContains(log, "seedCraftingRecipes", "explains WHY AE can't autocraft it")
+  expectContains(log, "Seed Infusion Altar", "names where seeds come from")
+  expectContains(log, "autocraft", "tells the operator to wire the altar into AE autocrafting")
+end)
+
+-- The operator has an AUTOMATED Seed Infusion Altar wired into AE autocrafting, so
+-- sulfur_seeds ARE craftable (count 0, isCraftable). The diag (like the real build's
+-- restock) must CRAFT craftable items, not only export stocked ones - else it falsely
+-- reports a seed the AE can actually make as missing.
+T("diag: a craftable sulfur seed is auto-crafted and staged (no bare FAIL)", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "north", fuel = 50000 } }
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 0, z = 0 }, size = { w = 1, h = 1, d = 1 },
+    heading = "north", scan_y = 2,
+    start = { x = 0, y = 64, z = 0 }, start_heading = "north",
+    build = { x = 0, y = 0, z = 0 }, plots = 1, fleet = "farm1",
+  }]]
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }
+  local fert = env:fertilizerItem{ count = 64 }
+  local water = env:waterBucketItem(); water.count = 16
+  -- the seed is NOT stocked but IS craftable (the automated altar -> AE pattern)
+  local seed = { id = "mysticalagriculture:sulfur_seeds", count = 0, isCraftable = true }
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
+    blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6,
+    usage = 5, craftSeconds = 1, items = { dirt, hoe, fert, water, seed } })
+  env:addGeoScanner("scanner")
+  env:setBlock(0, 63, 0, { id = "minecraft:dirt" })
+  current = env
+  env:run(FARM, { "diag" }, { maxTime = 4000 })
+  local log = env:file("farm.log") or ""
+  expectContains(log, "AE PULL: seed: PASS", "the craftable seed was auto-crafted + staged")
+  expectNotContains(log, "AE PULL: seed: FAIL", "no false 'seed missing' when the AE can craft it")
 end)
 
 T("ae: an empty/disconnected bridge shows 0 item types and PULL FAILED", function()

@@ -2299,6 +2299,7 @@ if cmd == "diag" then
   -- works (straight into me, or a chest above/below I suck) - diag's own pull,
   -- independent of the build's park navigation.
   local function pullItem(slot, name, count)
+    local need = count or 1
     local function invCount()
       local n = 0
       for s = 1, 16 do
@@ -2307,14 +2308,32 @@ if cmd == "diag" then
       end
       return n
     end
-    local before = invCount()
-    for _, side in ipairs(CAL_EXPORT_SIDES) do
-      local n = bcall("exportItem", { name = name, count = count or 1 }, side)
-      if type(n) == "number" and n > 0 then
-        if invCount() > before then break end
-        turtle.select(slot)
-        if turtle.suckDown() or turtle.suckUp() then break end
+    local function exportNow()
+      local was = invCount()
+      for _, side in ipairs(CAL_EXPORT_SIDES) do
+        local n = bcall("exportItem", { name = name, count = need }, side)
+        if type(n) == "number" and n > 0 then
+          if invCount() > was then return true end
+          turtle.select(slot)
+          if turtle.suckDown() or turtle.suckUp() then return true end
+        end
       end
+      return invCount() > was
+    end
+    exportNow()
+    -- Not in stock? CRAFT it - the operator's autocrafter (e.g. an automated Seed
+    -- Infusion Altar wired into AE) covers items with no plain stock. Fire the
+    -- craft, wait for OBSERVED stock, then export. Mirrors the build's restock so
+    -- the diag reports what the BUILD can actually obtain, not just what's stocked.
+    if invCount() < need and bcall("isCraftable", { name = name }) == true then
+      bcall("craftItem", { name = name, count = need })
+      local deadline = os.clock() + (cfg.craft_timeout or 60)
+      while os.clock() < deadline do
+        local it = bcall("getItem", { name = name })
+        if it and (it.count or 0) >= need then break end
+        os.sleep(0.5)
+      end
+      exportNow()
     end
     -- gather every stack of `name` into the work slot (the build's fixed-slot rule)
     for s = 1, 16 do
@@ -2324,7 +2343,7 @@ if cmd == "diag" then
       end
     end
     turtle.select(slot)
-    return invCount() >= (count or 1)
+    return invCount() >= need
   end
 
   -- AE STOCK PULL: a stocked item (dirt) must reach the turtle
@@ -2371,10 +2390,10 @@ if cmd == "diag" then
   -- guidance, not a bare "no <id> from AE" that looks like a code bug.
   local function actionableMiss(name)
     if name == seedId then
-      return ("no " .. name .. " in AE - stock/auto-craft sulfur seeds: the pack "
-        .. "disables the crafting recipe (seedCraftingRecipes=false), so obtain them "
-        .. "via the Seed Infusion Altar (or harvest an existing crop) and keep a stack "
-        .. "in AE")
+      return ("no " .. name .. " in AE (not stocked, and AE has no craft pattern) - "
+        .. "wire your Seed Infusion Altar into AE autocrafting (a processing pattern "
+        .. "makes sulfur_seeds craftable, since the pack disables the table recipe), or "
+        .. "keep a stack stocked")
     end
     return "no " .. name .. " from AE"
   end
