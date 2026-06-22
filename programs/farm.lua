@@ -1112,6 +1112,19 @@ local function isHoe(name) return type(name) == "string" and name:find("_hoe", 1
 
 local function ensureHoe()
   turtle.select(cfg.slots.hoe)
+  -- KILL SAFETY: tilling EQUIPS the hoe on the left side (CC's real till verb is
+  -- equip+dig). A reboot mid-till keeps an equipped upgrade on the turtle but leaves
+  -- the hoe SLOT empty, so a naive restock would report a false "no hoe available".
+  -- If the slot is empty/non-hoe, first try to RECOVER a side-equipped hoe by
+  -- swapping it back (equipLeft into the empty slot); harmless if nothing's equipped.
+  local d0 = turtle.getItemDetail(cfg.slots.hoe, true)
+  if not (d0 and isHoe(d0.name)) and turtle.equipLeft then
+    turtle.equipLeft()
+    local rec = turtle.getItemDetail(cfg.slots.hoe, true)
+    if not (rec and isHoe(rec.name)) and turtle.equipLeft then
+      turtle.equipLeft() -- not a hoe: put the side back the way it was
+    end
+  end
   local d = turtle.getItemDetail(cfg.slots.hoe, true)
   local hoeSpec = { name = cfg.items.hoe, alt = "_hoe" }
   -- restock() prefers a STOCKED *_hoe over an autocraft (a craft can stall). If
@@ -1156,42 +1169,70 @@ end
 
 local FERTILIZED_SOIL = "farmingforblockheads:fertilized_farmland_healthy"
 
--- Till the dirt directly BELOW the current stance (cx, Y0+1, cz) by tilling it
--- from the SIDE. Vanilla HoeItem only converts dirt->farmland when the block
--- directly above the dirt is air (HoeItem.onlyIfAirAbove), and a CC turtle's own
--- block is never removed during place() (TurtlePlaceCommand only repositions a
--- fake player) - so a placeDown from the stance ABOVE the dirt sees the turtle's
--- own cell and silently no-ops (the in-game "plot N: till" halt). Instead, step
--- into a clear horizontal neighbour, drop to the soil layer, face back toward the
--- dirt, and till it as the block IN FRONT (its block above is now air). Returns
--- to the stance and restores the heading on success. Kill-safe: every move
--- journals S.pos, and a resume re-runs doSoil (tilling existing farmland is a
--- no-op), so a kill mid-side-till converges.
+-- ROOT CAUSE (vendored, definitive): CC:Tweaked does NOT till with place()-with-hoe.
+-- The hoe is a computercraft:tool UPGRADE, and tilling is a dig()/digDown() op:
+-- TurtleTool.dig -> useTool runs the hoe's useOn BEFORE any break when
+-- hasToolUsage(stack) is true (HOE_TILL; TurtleTool.java:265-324,
+-- PlatformHelperImpl.java:206-208). CC's own gametests prove it: Hoe_dirt does
+-- turtle.dig() -> FARMLAND and Hoe_dirt_below does turtle.digDown() -> FARMLAND
+-- (Turtle_Test.kt:258-273). place()-with-hoe instead falls through TurtlePlaceCommand
+-- (the hoe is not a Bucket/BlockItem, so it never gets the working useItem
+-- special-case at :228-234) and silently no-ops - the operator's v52 SIDE-TILL halt.
+--
+-- So we EQUIP the hoe on a turtle side and DIG. equipHoe selects the hoe slot and
+-- swaps it onto the LEFT side as a tool upgrade; equipping again swaps it back into
+-- the slot. withHoeEquipped runs body() with the hoe equipped and always restores it.
+local function equipHoe()
+  turtle.select(cfg.slots.hoe)
+  return turtle.equipLeft()
+end
+local function unequipHoe()
+  turtle.select(cfg.slots.hoe)
+  return turtle.equipLeft() -- swap the equipped hoe back into the (now-empty) slot
+end
+
+-- Till the dirt directly BELOW the current stance, equip-and-dig style (CC's real
+-- mechanism). Step into a clear horizontal neighbour, drop to the dirt's own Y, face
+-- back toward the dirt, EQUIP the hoe and turtle.dig() it as the block IN FRONT (its
+-- block above is now air - the turtle vacated the stance, satisfying
+-- HoeItem.onlyIfAirAbove). Tries ALL FOUR sides and only fails if none produced
+-- farmland. Returns to the stance and restores the heading. Kill-safe: every move
+-- journals S.pos, and a resume re-runs doSoil (tilling existing farmland is a no-op),
+-- so a kill mid-side-till converges. The move return values are GUARDED so S.pos can
+-- never desync (a blocked goUp/goFwd aborts the side instead of silently mis-tracking).
 local function tillBelowFromSide()
   local saved = S.heading
+  equipHoe()
   for _, dir in ipairs({ "north", "south", "east", "west" }) do
     faceTo(dir)
     -- the stance-level neighbour and the soil-level neighbour must both be clear
     if not turtle.detect() and goFwd() then
       if not turtle.detectDown() and goDown() then
         faceTo(OPPD[dir]) -- face back toward the dirt cell (now in front)
-        turtle.select(cfg.slots.hoe)
-        intent("till"); turtle.place(); clearIntent()
+        intent("till"); turtle.dig(); clearIntent() -- equipped hoe tills the front
         local has, info = turtle.inspect()
         local tilled = has and (info.name == "minecraft:farmland"
           or info.name == FERTILIZED_SOIL)
-        -- return to the stance: rise back to the stance layer, then step back
-        -- into the stance column (we already face OPPD[dir], i.e. toward it)
-        goUp(); goFwd()
+        -- return to the stance: rise back to the stance layer, then step back into
+        -- the stance column (we already face OPPD[dir], i.e. toward it). GUARD the
+        -- moves: if either is blocked, restore heading + hoe and report failure
+        -- rather than leaving S.pos desynced one cell low/forward.
+        if not goUp() or not goFwd() then
+          faceTo(saved); unequipHoe(); return false
+        end
         faceTo(saved)
-        if tilled then return true end
+        if tilled then unequipHoe(); return true end
       else
-        -- could not drop beside the dirt: back out of the neighbour and try next
-        faceTo(OPPD[dir]); goFwd(); faceTo(saved)
+        -- could not drop beside the dirt: back out of the neighbour and try next.
+        -- GUARD the step-back so a blocked exit doesn't desync S.pos.
+        faceTo(OPPD[dir])
+        if not goFwd() then faceTo(saved); unequipHoe(); return false end
+        faceTo(saved)
       end
     end
   end
   faceTo(saved)
+  unequipHoe()
   return false
 end
 
@@ -1591,6 +1632,13 @@ local function runBuild()
       S.err = why
       saveJournal()
       print("farm: build halted at plot " .. plot .. ": " .. tostring(why))
+      -- ACTIONABLE seed guidance: 'no-seed' is almost always the pack's disabled
+      -- seed-crafting recipe, not a code bug (mysticalagriculture-common.toml:28).
+      if why == "no-seed" then
+        print("farm: stock/auto-craft sulfur seeds - the pack disables the crafting")
+        print("  recipe (seedCraftingRecipes=false); obtain via the Seed Infusion Altar")
+        print("  or by harvesting an existing crop, then keep a stack in AE.")
+      end
       return
     end
   end
@@ -2315,10 +2363,25 @@ if cmd == "diag" then
   -- still visible). The rise-and-test steps below NEVER pull; they consume what was
   -- staged here. Dirt needs 2 (the PLACE DIRT cell + the WATER brace).
   local seedId = "mysticalagriculture:sulfur_seeds"
+  -- SEED ROBUSTNESS (deliverable 4): the id and the _crop->_seeds derivation are
+  -- correct; the seed is simply not in AE because the pack disables the crafting-table
+  -- recipe (seedCraftingRecipes=false, mysticalagriculture-common.toml:28) and the only
+  -- other source is the Seed Infusion Altar (a custom RecipeType "infusion",
+  -- ModRecipeTypes.java:18 - not AE2-encodable). So a seed miss gets ACTIONABLE
+  -- guidance, not a bare "no <id> from AE" that looks like a code bug.
+  local function actionableMiss(name)
+    if name == seedId then
+      return ("no " .. name .. " in AE - stock/auto-craft sulfur seeds: the pack "
+        .. "disables the crafting recipe (seedCraftingRecipes=false), so obtain them "
+        .. "via the Seed Infusion Altar (or harvest an existing crop) and keep a stack "
+        .. "in AE")
+    end
+    return "no " .. name .. " from AE"
+  end
   local function stage(item, slot, name, count)
     step("AE PULL: " .. item, function()
       local ok = pullItem(slot, name, count or 1)
-      return ok, ok and ("staged " .. name) or ("no " .. name .. " from AE")
+      return ok, ok and ("staged " .. name) or actionableMiss(name)
     end)
   end
   stage("dirt", cfg.slots.dirt, cfg.items.dirt, 2)
@@ -2384,14 +2447,122 @@ if cmd == "diag" then
       return h and i.name == cfg.items.dirt, "placed " .. tostring(h and i.name)
     end)
 
-    -- SIDE-TILL the dirt -> farmland (the key proof: works in clear air). The hoe
-    -- was staged into cfg.slots.hoe while docked; tillBelowFromSide selects that
-    -- slot. NO pull here - the bridge is out of reach after the rise.
-    step("SIDE-TILL", function()
-      if turtle.getItemCount(cfg.slots.hoe) < 1 then return false, "no hoe staged" end
-      tillBelowFromSide()
+    -- TILL PROBE: EMPIRICALLY decide what tills in-game. The source proves CC tills
+    -- via equip + dig/digDown, NOT place()-with-hoe (TurtleTool.java:265-324,
+    -- Turtle_Test.kt:258-273) - but the operator's pack is NeoForge and the source
+    -- can't fully settle a fake-player place() edge, so the probe TRIES each method on
+    -- FRESH dirt in clear air and reports which produced farmland, with the place/dig
+    -- return, the hoe slot count, and the block id after. Each line is formatted
+    -- exactly 'TILL via <m>: PASS/FAIL (hoe xN, ret=BOOL, after=ID)'. The methods that
+    -- FAIL (place/placeDown with the hoe) prove the root cause; the equip+dig methods
+    -- PASS. After the probe the main soil cell is left as farmland (via the working
+    -- method) so FERTILIZE/PLANT continue. Guarded; every probe block is cleaned up.
+    --
+    -- probeOn(name, x,y,z, tryFn): place fresh dirt at (x,y,z), run tryFn() (returns a
+    -- boolean ret = the place/dig call's own return), read the after-id, append the
+    -- formatted line to tillProbe, and return whether it tilled to farmland.
+    local tillProbe = {} -- per-method result lines, rolled up after
+    local hoeOk = turtle.getItemCount(cfg.slots.hoe) >= 1
+    local function freshDirt(x, y, z)
+      navTo(x, y + 1, z) -- stance one above the cell
+      turtle.select(cfg.slots.dirt)
+      if turtle.getItemCount(cfg.slots.dirt) < 1 then return false end
+      if turtle.placeDown() then noteAbs(x, y, z); return true end
+      -- already a (probe) block here? treat a present dirt as fresh
       local h, i = turtle.inspectDown()
-      return h and i.name == "minecraft:farmland", "below is " .. tostring(h and i.name)
+      return h and i.name == cfg.items.dirt
+    end
+    local function afterId(x, y, z)
+      navTo(x, y + 1, z)
+      local h, i = turtle.inspectDown()
+      return h and i.name or "air"
+    end
+    local function probeOn(name, x, y, z, tryFn, keep)
+      local ret = false
+      if hoeOk and freshDirt(x, y, z) then
+        local ok, r = pcall(tryFn, x, y, z)
+        ret = ok and r and true or false
+      end
+      local after = afterId(x, y, z)
+      local tilled = (after == "minecraft:farmland")
+      tillProbe[#tillProbe + 1] = ("TILL via %s: %s (hoe x%d, ret=%s, after=%s)")
+        :format(name, tilled and "PASS" or "FAIL",
+          turtle.getItemCount(cfg.slots.hoe), tostring(ret), after)
+      -- clean up the probe cell immediately unless it's the MAIN cell we keep tilled
+      -- (so the side probe column never collides with the WATER column at sx+1).
+      if not keep then
+        navTo(x, y + 1, z); turtle.select(cfg.slots.scratch)
+        if turtle.detectDown() then turtle.digDown() end
+      end
+      return tilled
+    end
+
+    step("TILL PROBE", function()
+      if not hoeOk then return false, "no hoe staged" end
+      -- beside(x,y,z, verb): from the stance above fresh dirt, step into a clear
+      -- horizontal neighbour, drop to the dirt's Y, face back toward the dirt, run
+      -- verb() against the dirt IN FRONT, then return to the stance above the cell.
+      -- Returns verb()'s own boolean (or false if there was nowhere to stand).
+      local function beside(x, y, z, verb)
+        navTo(x, y + 1, z)
+        local moved = false
+        for _, dir in ipairs({ "north", "south", "east", "west" }) do
+          faceTo(dir)
+          if not turtle.detect() and goFwd() then
+            if not turtle.detectDown() and goDown() then moved = dir; break end
+            faceTo(OPPD[dir]); goFwd(); faceTo(S.heading) -- back out, try next
+          end
+        end
+        if not moved then return false end
+        faceTo(OPPD[moved]) -- face the dirt (now in front)
+        local r = verb()
+        goUp(); goFwd() -- rise to the stance layer, step back over the cell
+        return r and true or false
+      end
+      -- (a) side-place: face fresh dirt from the side and place() the hoe as the block
+      -- IN FRONT (the old, broken path - expected FAIL, proving the root cause).
+      probeOn("side-place", sx + 1, soilY, sz, function(x, y, z)
+        return beside(x, y, z, function()
+          turtle.select(cfg.slots.hoe); return turtle.place()
+        end)
+      end)
+      -- (b) place-down: from the stance directly above fresh dirt, placeDown() the hoe
+      -- (expected FAIL - the turtle's own block is the non-air above the dirt).
+      probeOn("place-down", sx + 1, soilY, sz, function(x, y, z)
+        navTo(x, y + 1, z); turtle.select(cfg.slots.hoe)
+        return turtle.placeDown()
+      end)
+      -- (c) equip+digDown: equip the hoe, rise one to open the air gap below, digDown
+      -- (the 'one-extra-block below' rule tills the dirt under the gap), descend, swap
+      -- the hoe back. CC's REAL mechanism (expected PASS). Run on the MAIN soil cell so
+      -- the farmland it leaves feeds FERTILIZE/PLANT.
+      local cMain = probeOn("equip+digDown", sx, soilY, sz, function(x, y, z)
+        navTo(x, y + 2, z) -- stance two above the dirt => a one-block air gap below
+        turtle.select(cfg.slots.hoe); turtle.equipLeft()
+        local r = turtle.digDown()
+        turtle.select(cfg.slots.hoe); turtle.equipLeft() -- swap the hoe back
+        return r
+      end, true) -- keep: this is the MAIN cell, leave the farmland for FERTILIZE/PLANT
+      -- (d) equip+dig-side: equip the hoe, step beside FRESH dirt at its Y, face it and
+      -- dig() it as the block in front (the Hoe_dirt gametest - expected PASS).
+      probeOn("equip+dig-side", sx + 1, soilY, sz, function(x, y, z)
+        turtle.select(cfg.slots.hoe); turtle.equipLeft()
+        local r = beside(x, y, z, function() return turtle.dig() end)
+        turtle.select(cfg.slots.hoe); turtle.equipLeft() -- swap the hoe back
+        return r
+      end)
+      -- log every probe line (the operator's definitive in-game record)
+      for _, ln in ipairs(tillProbe) do print("  " .. ln) end
+      -- leave the MAIN soil cell tilled for the downstream steps: if equip+digDown
+      -- didn't take (e.g. a NeoForge quirk), fall back to the side-till builder.
+      navTo(sx, soilY + 1, sz)
+      if afterId(sx, soilY, sz) ~= "minecraft:farmland" then tillBelowFromSide() end
+      local fin = afterId(sx, soilY, sz)
+      -- PASS iff at least one method tilled AND the main cell ended as farmland
+      local anyPass = cMain
+      for _, ln in ipairs(tillProbe) do if ln:find(": PASS", 1, true) then anyPass = true end end
+      return anyPass and fin == "minecraft:farmland",
+        "main cell " .. fin .. " (" .. #tillProbe .. " methods probed)"
     end)
 
     -- FERTILIZE -> fertilized_farmland_healthy (consumes the staged fertilizer)

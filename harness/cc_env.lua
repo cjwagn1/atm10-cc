@@ -251,6 +251,11 @@ function M.new(opts)
       limit = o.limit or 100000,
       inv = o.inv or {},     -- slot -> { id, count, components }
       sel = 1,
+      -- tool upgrades equipped on the turtle's two sides (left/right). A hoe
+      -- equipped here is CC's ACTUAL tilling mechanism: dig()/digDown() with a
+      -- HOE_TILL tool upgrade tills, NOT place() (TurtleTool.java:265-324). Each
+      -- side holds an inventory-stack-shaped table (or nil = no upgrade).
+      equipped = o.equipped or { left = nil, right = nil },
     }
     self.loadedBounds = opts.loadedBounds -- {minX,maxX,minZ,maxZ} or nil
     self.sideAttach = {}     -- side name -> peripheral entry (or nil)
@@ -658,7 +663,8 @@ function Env:addMeBridge(name, o)
         local n = math.min(want, s.count)
         local stack = { id = s.id, count = n, components = s.components,
           onUse = s.onUse, makeBlock = s.makeBlock, cropId = s.cropId,
-          displayName = s.displayName, damage = s.damage, maxDamage = s.maxDamage }
+          displayName = s.displayName, damage = s.damage, maxDamage = s.maxDamage,
+          toolUsage = s.toolUsage }
         if not env:giveToTurtle(stack) then return 0, "INVENTORY_FULL" end
         s.count = s.count - n
         return n
@@ -682,7 +688,8 @@ function Env:addMeBridge(name, o)
       local g = env.ground[key] or {}
       g[#g + 1] = { id = s.id, count = n, components = s.components,
         onUse = s.onUse, makeBlock = s.makeBlock, cropId = s.cropId,
-        displayName = s.displayName, damage = s.damage, maxDamage = s.maxDamage }
+        displayName = s.displayName, damage = s.damage, maxDamage = s.maxDamage,
+        toolUsage = s.toolUsage }
       env.ground[key] = g
       return n
     end,
@@ -1252,46 +1259,67 @@ local PLACE_FAIL = "Cannot place item here"
 local FARMLAND = "minecraft:farmland"
 local FERTILIZED = "farmingforblockheads:fertilized_farmland_healthy"
 
-local function isFarmland(id) return id == FARMLAND or id == FERTILIZED end
+-- MA essence (Infused) farmland tiers extend vanilla FarmBlock (InfusedFarmlandBlock.java:29)
+-- and sustain crops unconditionally, so a seed plants on them like on plain farmland.
+-- prudentium_farmland is the sulfur-tier (TWO) hoe-free alt-soil (ModBlocks.java:72).
+local ESSENCE_FARMLAND = "mysticalagriculture:prudentium_farmland"
+
+local function isFarmland(id)
+  return id == FARMLAND or id == FERTILIZED or id == ESSENCE_FARMLAND
+end
 
 -- a brace face for fluid placement / planting: any non-fluid block
 local function isSolid(b) return b ~= nil and b.id ~= "minecraft:water"
   and b.id ~= "minecraft:lava" end
 
--- The hoe tills dirt/grass/path into farmland; it is NOT consumed, only loses
--- durability (TurtlePlaceCommand.java:223 -> vanilla HoeItem.useOn). The stack
--- carries damage/maxDamage so getItemDetail(slot, true) exposes durability.
+-- The hoe tills dirt/grass/path into farmland - but ONLY via CC's tool-upgrade
+-- path (equip + dig/digDown), NOT via place(). See Env:tillWithTool below and the
+-- dig() handler in buildTurtleApi. It is NOT consumed, only loses durability
+-- (vanilla HoeItem.useOn invoked from TurtleTool.useTool, TurtleTool.java:307-322).
 local TILLABLE = { ["minecraft:dirt"] = true, ["minecraft:grass_block"] = true,
   ["minecraft:dirt_path"] = true, ["minecraft:coarse_dirt"] = true,
   ["minecraft:rooted_dirt"] = true }
 
+-- ROOT CAUSE FIDELITY: the hoe carries toolUsage = "HOE_TILL" (the marker the
+-- harness dig()/digDown() reads to run CC's useTool tilling) and an onUse that
+-- DELIBERATELY refuses to till. In CC:Tweaked the hoe is NOT a BucketItem/BlockItem,
+-- so TurtlePlaceCommand never gives it the working useItem special-case: stack.useOn
+-- returns PASS, the deploy falls through, and nothing tills (the operator's v52
+-- in-game SIDE-TILL halt). Tilling is a dig()/digDown() tool-upgrade op
+-- (Turtle_Test.kt:258-273; TurtleTool.java:265-324). Modeling place()-with-hoe as a
+-- no-op is what makes the harness agree with the game.
 function Env:hoeItem(o)
   o = o or {}
-  local env = self
   return {
     id = o.id or "minecraft:diamond_hoe", count = 1,
     displayName = o.displayName or "Diamond Hoe",
     damage = o.damage or 0, maxDamage = o.durability or 1561, -- diamond default
-    onUse = function(_, x, y, z, _dir, s)
-      local b = env.world[keyOf(x, y, z)]
-      if not (b and TILLABLE[b.id]) then return false, PLACE_FAIL end
-      if (s.damage or 0) >= s.maxDamage then return false, PLACE_FAIL end -- broken
-      -- Vanilla HoeItem.onlyIfAirAbove: dirt only converts when the block
-      -- DIRECTLY ABOVE the target is air (HoeItem.java; clickedFace != DOWN &&
-      -- level.getBlockState(clickedPos.above()).isAir()). A CC place() does NOT
-      -- remove the turtle's own block during the use (TurtlePlaceCommand only
-      -- repositions a fake player), so a placeDown-from-above till sees the
-      -- TURTLE'S cell above the dirt and silently no-ops. Model both occupants:
-      -- a real world block above, OR the turtle itself standing at (x, y+1, z).
-      local above = env.world[keyOf(x, y + 1, z)]
-      local t = env.turtle
-      local turtleAbove = t and t.pos.x == x and t.pos.y == y + 1 and t.pos.z == z
-      if above ~= nil or turtleAbove then return false, PLACE_FAIL end -- no till, no spend
-      env.world[keyOf(x, y, z)] = { id = FARMLAND, state = { moisture = 0 } }
-      s.damage = (s.damage or 0) + 1
-      return true, nil, 0 -- not consumed
-    end,
+    toolUsage = "HOE_TILL", -- the equip+dig tilling marker (PlatformHelperImpl:206)
+    onUse = function() return false, PLACE_FAIL end, -- place()-with-hoe never tills
   }
+end
+
+-- CC's REAL tilling: equip the hoe as a tool upgrade, then dig()/digDown(). Convert
+-- a TILLABLE block at (x,y,z) to farmland, spend 1 durability, do NOT consume. The
+-- "air-above" gate still applies (HoeItem.onlyIfAirAbove) - the equipped-tool path
+-- doesn't bypass it; but for digDown the turtle's stance above the dirt is exactly
+-- the air the rule wants (the dirt is one BELOW the stance, with the turtle two-up),
+-- so the gate is naturally satisfied. Returns true on a successful till, false
+-- otherwise (caller then falls through to a normal break).
+function Env:tillWithTool(stack, x, y, z)
+  local b = self.world[keyOf(x, y, z)]
+  if not (b and TILLABLE[b.id]) then return false end
+  if (stack.damage or 0) >= (stack.maxDamage or 0) then return false end -- broken
+  -- air-above gate: the cell directly above the target must be air (no world block
+  -- AND no turtle occupying it). digDown's "one-extra-block" rule guarantees the
+  -- turtle is two-above, so only a real world block can block it here.
+  local above = self.world[keyOf(x, y + 1, z)]
+  local t = self.turtle
+  local turtleAbove = t and t.pos.x == x and t.pos.y == y + 1 and t.pos.z == z
+  if above ~= nil or turtleAbove then return false end
+  self.world[keyOf(x, y, z)] = { id = FARMLAND, state = { moisture = 0 } }
+  stack.damage = (stack.damage or 0) + 1
+  return true
 end
 
 -- FfB red fertilizer: applies the HEALTHY trait to plain farmland once and
@@ -1311,6 +1339,21 @@ function Env:fertilizerItem(o)
       env.world[keyOf(x, y, z)] = { id = FERTILIZED, state = { moisture = 0 } }
       return true, nil, 1
     end,
+  }
+end
+
+-- MA essence farmland (alt-soil): a PLAIN placeable BlockItem (BaseBlockItem,
+-- ModBlocks.java:136). It places onto an empty cell like any block - NO hoe, NO
+-- air-above gate, NO till. It is AE2-craftable via the farmland_till recipe (the hoe
+-- is a crafting catalyst, not a turtle tool). With no onUse hook it flows through the
+-- harness's normal block-place path (place() at cc_env: the "Cannot place block here"
+-- branch), so it can't target an occupied cell - exactly a vanilla BlockItem. isFarmland
+-- accepts it, so a seed plants on it. This is the operator's clean tiling-free tier.
+function Env:essenceFarmlandItem(o)
+  o = o or {}
+  return {
+    id = o.id or ESSENCE_FARMLAND, count = o.count or 1,
+    displayName = o.displayName or "Prudentium Farmland",
   }
 end
 
@@ -1621,8 +1664,28 @@ local function buildTurtleApi(env, osT)
   function T.placeUp() return place("up") end
   function T.placeDown() return place("down") end
 
+  -- CC's real tilling: dig()/digDown() with a HOE_TILL tool upgrade equipped runs
+  -- useTool BEFORE any break (TurtleTool.java:265-324). Try it first; on a successful
+  -- till the dig returns success without breaking anything.
+  local function tilledWithEquippedTool(dir)
+    local tool = t.equipped and (t.equipped.left or t.equipped.right)
+    if not (tool and tool.toolUsage == "HOE_TILL") then return false end
+    local x, y, z = targetCell(dir)
+    -- "one extra block below the turtle" rule (TurtleTool.java:309-311): for DOWN,
+    -- when the cell directly below the turtle is empty, the till target drops one
+    -- further - so digDown tills the dirt UNDER the stance even though the turtle
+    -- occupies the cell directly above that dirt.
+    if dir == "down" and env.world[keyOf(x, y, z)] == nil then y = y - 1 end
+    return env:tillWithTool(tool, x, y, z)
+  end
+
   local function dig(dir)
     takeTime()
+    if tilledWithEquippedTool(dir) then
+      env.worldOps = (env.worldOps or 0) + 1
+      env:rescanSides(false)
+      return true
+    end
     local x, y, z = targetCell(dir)
     local key = keyOf(x, y, z)
     local b = env.world[key]
@@ -1671,7 +1734,8 @@ local function buildTurtleApi(env, osT)
     local cnt = math.min(n or s.count, s.count)
     dropAt(keyOf(x, y, z),
       { id = s.id, count = cnt, components = s.components, onUse = s.onUse,
-        makeBlock = s.makeBlock, cropId = s.cropId, displayName = s.displayName })
+        makeBlock = s.makeBlock, cropId = s.cropId, displayName = s.displayName,
+        damage = s.damage, maxDamage = s.maxDamage, toolUsage = s.toolUsage })
     s.count = s.count - cnt
     if s.count <= 0 then t.inv[t.sel] = nil end
     return true
@@ -1763,12 +1827,55 @@ local function buildTurtleApi(env, osT)
     else
       t.inv[slot] = { id = src.id, count = n, components = src.components,
         onUse = src.onUse, makeBlock = src.makeBlock, cropId = src.cropId,
-        displayName = src.displayName, damage = src.damage, maxDamage = src.maxDamage }
+        displayName = src.displayName, damage = src.damage, maxDamage = src.maxDamage,
+        toolUsage = src.toolUsage }
     end
     src.count = src.count - n
     if src.count <= 0 then t.inv[t.sel] = nil end
     return true
   end
+
+  -- equipLeft/equipRight: swap the SELECTED slot's item with the tool currently
+  -- equipped on that side (TurtleEquipCommand.java:26-37). This is how a turtle
+  -- mounts a hoe as a tool upgrade so dig()/digDown() can till. The previously
+  -- equipped tool (if any) lands back in the selected slot. Returns true.
+  local function equip(side)
+    takeTime()
+    local prev = t.equipped[side]
+    local sel = t.inv[t.sel]
+    -- only a single-item tool moves onto the side; CC equips one item and returns
+    -- the rest. A 1-count stack (the hoe) moves cleanly.
+    if sel then
+      if sel.count > 1 then
+        -- split: one item becomes the upgrade, the remainder stays in the slot
+        t.equipped[side] = { id = sel.id, count = 1, displayName = sel.displayName,
+          damage = sel.damage, maxDamage = sel.maxDamage, toolUsage = sel.toolUsage,
+          onUse = sel.onUse, makeBlock = sel.makeBlock, cropId = sel.cropId,
+          components = sel.components }
+        sel.count = sel.count - 1
+        -- the previously equipped tool can't fit beside a remaining stack; it is
+        -- placed only if the slot frees up - here it doesn't, so it's dropped to
+        -- a free slot
+        if prev then
+          local placed = false
+          for i = 1, 16 do
+            if not t.inv[i] then t.inv[i] = prev; placed = true; break end
+          end
+          if not placed then dropAt(keyOf(t.pos.x, t.pos.y, t.pos.z), prev) end
+        end
+      else
+        t.equipped[side] = sel
+        t.inv[t.sel] = prev -- prior tool (or nil) returns to the slot
+      end
+    else
+      t.equipped[side] = nil
+      t.inv[t.sel] = prev
+    end
+    env:rescanSides(false)
+    return true
+  end
+  function T.equipLeft() return equip("left") end
+  function T.equipRight() return equip("right") end
 
   return T
 end

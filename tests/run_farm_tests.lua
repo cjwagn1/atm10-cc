@@ -263,65 +263,192 @@ end)
 -- useOn; the hoe tills dirt->farmland WITHOUT being consumed (durability only),
 -- TurtlePlaceCommand.java:223 + vanilla HoeItem.useOn.
 
--- Vanilla HoeItem.onlyIfAirAbove: dirt only tills when the block DIRECTLY ABOVE
--- the target is air. A CC place() never removes the turtle's own block during
--- the use (TurtlePlaceCommand repositions a fake player; the turtle block stays
--- in the world), so a placeDown-from-ABOVE till sees the turtle's own cell over
--- the dirt and silently NO-OPS - the in-game "plot 0: till" halt. A horizontal
--- SIDE till (turtle beside the dirt, air above the dirt) DOES convert.
-T("hoe: placeDown from ABOVE does NOT till (turtle's own block blocks air-above)", function()
-  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
-    facing = "east", fuel = 100, inv = { [1] = nil } } }
-  env.turtle.inv[1] = env:hoeItem{ durability = 100 }
-  env:setBlock(0, 63, 0, { id = "minecraft:dirt" })   -- cell below the turtle
-  env.files["prog.lua"] = [[
-    local out = fs.open("out", "w")
-    out.writeLine(tostring(turtle.placeDown()))         -- till dirt below -> no-op
-    local d = turtle.getItemDetail(1, true)
-    out.writeLine("dmg=" .. tostring(d and d.damage))
-    out.close()
-  ]]
-  current = env
-  local res = env:run("prog.lua", {}, { maxTime = 30, fromVirtualFs = true })
-  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
-  eq(env:block(0, 63, 0).id, "minecraft:dirt", "dirt stays dirt - turtle blocks air-above")
-  eq(env:file("out"), "false\ndmg=0\n", "till fails, no durability spent")
-end)
-
-T("hoe: a non-air world block above the dirt also blocks the till", function()
-  local env = CC.new{ turtle = { pos = { x = 5, y = 64, z = 0 },
-    facing = "east", fuel = 100, inv = { [1] = nil } } }
-  env.turtle.inv[1] = env:hoeItem{ durability = 100 }
-  -- turtle is far away; the dirt has a STONE block directly above it
-  env:setBlock(0, 63, 0, { id = "minecraft:dirt" })
-  env:setBlock(0, 64, 0, { id = "minecraft:stone" })
-  local hoe = env.turtle.inv[1]
-  local ok = hoe.onUse(env, 0, 63, 0, "down", hoe)
-  eq(ok, false, "till refused - non-air block above the dirt")
-  eq(env:block(0, 63, 0).id, "minecraft:dirt", "dirt unchanged")
-  eq(hoe.damage, 0, "no durability spent")
-end)
-
-T("hoe: SIDE till (turtle beside, air above the dirt) converts to farmland", function()
-  -- turtle at (1,63,0) facing west, dirt at (0,63,0) - same Y, air above dirt
+-- ROOT CAUSE (definitive, vendored): CC:Tweaked does NOT till via place()-with-hoe.
+-- Tilling is a TOOL-UPGRADE op: equip the hoe on a turtle side, then dig()/digDown().
+-- Proof: CC's own gametests Hoe_dirt (turtle.dig() -> FARMLAND) and Hoe_dirt_below
+-- (turtle.digDown() -> FARMLAND) in Turtle_Test.kt:258-273; diamond_hoe is a
+-- computercraft:tool upgrade (data/.../turtle_upgrade/diamond_hoe.json). The tilling
+-- code is TurtleTool.dig -> useTool (TurtleTool.java:266-324): dig() calls
+-- hasToolUsage(stack) (HOE_TILL/SHOVEL_FLATTEN, PlatformHelperImpl.java:206-208) and
+-- runs stack.useOn BEFORE any break. useTool has the "one extra block below" rule
+-- (TurtleTool.java:309-311): when digDown is called and the cell directly below is
+-- empty (the turtle occupies it from above), the target drops one further, so
+-- digDown tills the dirt UNDER the stance.
+--
+-- place()-with-hoe does NOT till: the hoe is not a BucketItem/BlockItem so it never
+-- gets TurtlePlaceCommand's working useItem special-case; its useOn returns PASS and
+-- the deploy falls through, never tilling. The harness models BOTH outcomes faithfully
+-- so the tests agree with the game (the old harness modeled place()-hoe as a successful
+-- till - a wrong mental model that hid the v52 in-game halt).
+T("hoe: place()-with-hoe does NOT till - it is not CC's tilling verb", function()
+  -- turtle at (1,63,0) facing west, dirt at (0,63,0) - same Y, air above dirt:
+  -- the geometry the old (wrong) SIDE-till used. place() must NOT convert it.
   local env = CC.new{ turtle = { pos = { x = 1, y = 63, z = 0 },
     facing = "west", fuel = 100, inv = { [1] = nil } } }
   env.turtle.inv[1] = env:hoeItem{ durability = 100 }
   env:setBlock(0, 63, 0, { id = "minecraft:dirt" })   -- cell IN FRONT of turtle
   env.files["prog.lua"] = [[
     local out = fs.open("out", "w")
-    out.writeLine(tostring(turtle.place()))             -- till dirt in front
+    out.writeLine(tostring(turtle.place()))             -- NOT CC's till verb
+    out.writeLine(tostring(turtle.placeDown()))         -- nor is placeDown
     local d = turtle.getItemDetail(1, true)
-    out.writeLine((d and d.name or "nil") .. " x" .. tostring(d and d.count))
     out.writeLine("dmg=" .. tostring(d and d.damage))
     out.close()
   ]]
   current = env
   local res = env:run("prog.lua", {}, { maxTime = 30, fromVirtualFs = true })
   eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
-  eq(env:block(0, 63, 0).id, "minecraft:farmland", "dirt tilled to farmland from the side")
+  eq(env:block(0, 63, 0).id, "minecraft:dirt", "place()-with-hoe does NOT till")
+  eq(env:file("out"), "false\nfalse\ndmg=0\n", "place/placeDown both fail, no spend")
+end)
+
+T("hoe: equip + digDown tills the dirt BELOW the stance (one-extra-block rule)", function()
+  -- The Hoe_dirt_below gametest geometry (turtle_test.hoe_dirt_below.snbt): turtle
+  -- at y=65 with a ONE-BLOCK AIR GAP below it (y=64 empty) and the dirt at y=63.
+  -- useTool's DOWN rule (TurtleTool.java:309-311): digDown targets the cell directly
+  -- below (y=64); it's EMPTY, so the target drops one further to the dirt at y=63,
+  -- which now has air above it (the gap) -> it tills to farmland.
+  local env = CC.new{ turtle = { pos = { x = 0, y = 65, z = 0 },
+    facing = "east", fuel = 100, inv = { [1] = nil } } }
+  env.turtle.inv[2] = env:hoeItem{ durability = 100 }
+  env:setBlock(0, 63, 0, { id = "minecraft:dirt" }) -- two below, air gap at y=64
+  env.files["prog.lua"] = [[
+    local out = fs.open("out", "w")
+    turtle.select(2)
+    out.writeLine("equip=" .. tostring(turtle.equipLeft()))  -- hoe -> left side tool
+    out.writeLine("slotEmpty=" .. tostring(turtle.getItemCount(2) == 0))
+    out.writeLine("dig=" .. tostring(turtle.digDown()))      -- CC's real till verb
+    turtle.down()                                            -- drop into the gap
+    local h, i = turtle.inspectDown()                        -- now the farmland is below
+    out.writeLine("after=" .. tostring(h and i.name))
+    turtle.up()
+    turtle.select(2); turtle.equipLeft()                     -- swap hoe back
+    out.writeLine("backInSlot=" .. tostring(turtle.getItemCount(2) == 1))
+    out.close()
+  ]]
+  current = env
+  local res = env:run("prog.lua", {}, { maxTime = 30, fromVirtualFs = true })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(env:block(0, 63, 0).id, "minecraft:farmland", "digDown tilled the dirt below the gap")
   eq(env:file("out"),
-    "true\nminecraft:diamond_hoe x1\ndmg=1\n", "hoe survives, durability used")
+    "equip=true\nslotEmpty=true\ndig=true\nafter=minecraft:farmland\nbackInSlot=true\n",
+    "equip moves hoe to side, digDown tills the dirt below the gap, equip swaps it back")
+end)
+
+T("hoe: equip + dig tills the dirt IN FRONT (side stance)", function()
+  -- turtle at (1,63,0) facing west, dirt in front at (0,63,0), air above the dirt.
+  -- With the hoe equipped, turtle.dig() tills the front block (the Hoe_dirt
+  -- gametest, Turtle_Test.kt:258-261).
+  local env = CC.new{ turtle = { pos = { x = 1, y = 63, z = 0 },
+    facing = "west", fuel = 100, inv = { [1] = nil } } }
+  env.turtle.inv[2] = env:hoeItem{ durability = 100 }
+  env:setBlock(0, 63, 0, { id = "minecraft:dirt" })
+  env.files["prog.lua"] = [[
+    local out = fs.open("out", "w")
+    turtle.select(2); turtle.equipLeft()
+    out.writeLine("dig=" .. tostring(turtle.dig()))
+    local h, i = turtle.inspect()
+    out.writeLine("after=" .. tostring(h and i.name))
+    out.close()
+  ]]
+  current = env
+  local res = env:run("prog.lua", {}, { maxTime = 30, fromVirtualFs = true })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(env:block(0, 63, 0).id, "minecraft:farmland", "dig tilled the front dirt")
+  eq(env:file("out"), "dig=true\nafter=minecraft:farmland\n", "equip+dig tills in front")
+end)
+
+T("hoe: equip + dig does NOT break a non-dirt block in front (PASS-through dig)", function()
+  -- a HOE_TILL tool only TILLS tillables; on stone in front, dig falls through to
+  -- the normal break (CC dig still works as a tool). We assert it does not magically
+  -- "till" stone into farmland.
+  local env = CC.new{ turtle = { pos = { x = 1, y = 63, z = 0 },
+    facing = "west", fuel = 100, inv = { [1] = nil } } }
+  env.turtle.inv[2] = env:hoeItem{ durability = 100 }
+  env:setBlock(0, 63, 0, { id = "minecraft:stone" })
+  env.files["prog.lua"] = [[
+    turtle.select(2); turtle.equipLeft()
+    local out = fs.open("out", "w")
+    out.writeLine("dig=" .. tostring(turtle.dig()))
+    local h, i = turtle.inspect()
+    out.writeLine("after=" .. tostring(h and i.name or "air"))
+    out.close()
+  ]]
+  current = env
+  local res = env:run("prog.lua", {}, { maxTime = 30, fromVirtualFs = true })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  -- stone breaks normally (dig=true) and is removed, NOT tilled to farmland
+  eq(env:block(0, 63, 0), nil, "stone broken by the equipped hoe, not tilled")
+  eq(env:file("out"), "dig=true\nafter=air\n", "non-tillable just breaks")
+end)
+
+-- ALT-SOIL (hoe-free tier): MA prudentium_farmland is an InfusedFarmlandBlock(TWO)
+-- extending vanilla FarmBlock (ModBlocks.java:72; InfusedFarmlandBlock.java:29) wrapped
+-- in a BaseBlockItem (ModBlocks.java:136) and AE2-craftable via the farmland_till recipe
+-- (the hoe is a crafting catalyst, NOT a turtle tool). Placing it uses the WORKING
+-- BlockItem path - no hoe, no till. The harness models it as a plain placeable soil:
+-- it places onto air like any block, satisfies the seed's farmland-below brace, and
+-- needs NO air-above gate. This gives the operator a clean tiling-free alternative.
+T("alt-soil: prudentium_farmland places like a block and a seed plants on it", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 66, z = 0 },
+    facing = "east", fuel = 100, inv = {} } }
+  env.turtle.inv[1] = env:essenceFarmlandItem{ count = 8 }
+  env.turtle.inv[2] = env:seedItem("mysticalagriculture:sulfur_crop", { count = 8 })
+  -- place the alt-soil at (0,65,0) from the stance above it (a plain BlockItem place -
+  -- no hoe, no air-above gate), then plant a seed onto it from (0,66,0)
+  env.files["prog.lua"] = [[
+    local out = fs.open("out", "w")
+    turtle.down()                        -- to (0,65,0)? no - place from above
+    turtle.up()
+    turtle.select(1)
+    out.writeLine("soil=" .. tostring(turtle.placeDown())) -- soil at (0,65,0)
+    local h, i = turtle.inspectDown()
+    out.writeLine("after=" .. tostring(h and i.name))
+    turtle.up()                          -- to (0,67,0); seed targets (0,66,0)? no
+    out.close()
+  ]]
+  current = env
+  local res = env:run("prog.lua", {}, { maxTime = 30, fromVirtualFs = true })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(env:block(0, 65, 0) and env:block(0, 65, 0).id,
+    "mysticalagriculture:prudentium_farmland", "placed as a plain block, no hoe needed")
+  eq(env:file("out"),
+    "soil=true\nafter=mysticalagriculture:prudentium_farmland\n",
+    "placeDown placed the alt-soil with no air-above gate")
+  -- and a seed plants on it (isFarmland accepts the essence farmland brace)
+  env:setBlock(5, 64, 0, { id = "mysticalagriculture:prudentium_farmland" })
+  local seed = env:seedItem("mysticalagriculture:sulfur_crop", { count = 1 })
+  local ok = seed.onUse(env, 5, 65, 0, "down", seed)
+  eq(ok, true, "seed plants on essence farmland (isFarmland accepts it)")
+  eq(env:block(5, 65, 0) and env:block(5, 65, 0).id,
+    "mysticalagriculture:sulfur_crop", "crop sits on the alt-soil")
+end)
+
+-- KILL SAFETY: the equip-to-till approach has a window where the hoe is mounted on
+-- a turtle side (out of its slot). An in-game reboot KEEPS an equipped upgrade (it's
+-- part of the turtle), so on resume the hoe slot looks empty but the hoe is on the
+-- LEFT side. ensureHoe must RECOVER it (equipLeft swaps it back) instead of failing
+-- "no hoe available". This harness preserves env.turtle.equipped across runs, exactly
+-- like a real reboot, so the recovery path is testable.
+T("hoe: equipped-on-side hoe survives a reboot and is recovered into the slot", function()
+  -- a hoe sits on the LEFT side (a kill struck mid-till); the slot is empty
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "east", fuel = 100, inv = {} } }
+  env.turtle.equipped = { left = env:hoeItem{ durability = 100 }, right = nil }
+  env.files["prog.lua"] = [[
+    local out = fs.open("out", "w")
+    out.writeLine("before=" .. tostring(turtle.getItemCount(2)))  -- slot empty
+    turtle.select(2)
+    turtle.equipLeft()                                            -- recover the hoe
+    local d = turtle.getItemDetail(2)
+    out.writeLine("after=" .. tostring(d and d.name) .. " x" .. tostring(d and d.count))
+    out.close()
+  ]]
+  current = env
+  local res = env:run("prog.lua", {}, { maxTime = 30, fromVirtualFs = true })
+  eq(res.reason, "done", "run reason (err=" .. tostring(res.err) .. ")")
+  eq(env:file("out"), "before=0\nafter=minecraft:diamond_hoe x1\n",
+    "equipLeft swaps the equipped hoe back into the slot")
 end)
 
 -- FfB red fertilizer: farmland -> fertilized_healthy ONCE, shrinks 1; its only
@@ -1118,11 +1245,15 @@ end)
 
 -- `farm diag` is the operator's ground-truth capability self-test: a FAST check
 -- (no ~6-minute plot scan) that exercises every real-world capability the build
--- depends on - AE stock pull, AE craft, place dirt, SIDE-TILL, fertilize, plant,
+-- depends on - AE stock pull, AE craft, place dirt, a TILL PROBE, fertilize, plant,
 -- water - in a CLEAR test column it rises into, reports PASS/FAIL per capability,
 -- then cleans up every block it placed so it never damages the operator's farm.
--- The side-till PASS is the load-bearing one: it proves the till works in clear
--- air, so an in-game build halt is geometry (buried base), not a capability bug.
+-- The TILL PROBE is the load-bearing one: it EMPIRICALLY tries every tilling method
+-- on fresh dirt in clear air and reports which produced farmland, so the operator's
+-- next run is DEFINITIVE about what tills in-game. The root cause (place()-with-hoe
+-- does NOT till; CC tills via equip + dig/digDown - TurtleTool.java:265-324,
+-- Turtle_Test.kt:258-273) is proven by the probe: place/placeDown FAIL, equip+dig
+-- methods PASS.
 T("diag: capability self-test reports every capability PASS and leaves no mess", function()
   local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
     facing = "north", fuel = 50000 } }
@@ -1164,7 +1295,17 @@ T("diag: capability self-test reports every capability PASS and leaves no mess",
   expectContains(log, "AE STOCK PULL: PASS", "stock pull works")
   expectContains(log, "AE CRAFT: PASS", "ran the craft probe")
   expectContains(log, "PLACE DIRT: PASS", "placed dirt in clear air")
-  expectContains(log, "SIDE-TILL: PASS", "tilled from the side in clear air (the key proof)")
+  -- TILL PROBE: empirically tries each method on fresh dirt; the place()-with-hoe
+  -- methods FAIL (the root cause), the equip+dig methods PASS, each reported with the
+  -- ret value, hoe slot count, and the after-id - the operator's definitive in-game proof
+  expectContains(log, "TILL via side-place: FAIL", "place()-with-hoe from the side does NOT till")
+  expectContains(log, "TILL via place-down: FAIL", "placeDown-with-hoe from above does NOT till")
+  expectContains(log, "TILL via equip+digDown: PASS", "equip + digDown tills (CC's real verb)")
+  expectContains(log, "TILL via equip+dig-side: PASS", "equip + dig from the side tills")
+  -- each probe line carries the detail format: (hoe xN, ret=BOOL, after=ID)
+  expectContains(log, "after=minecraft:farmland", "a working method reports farmland after")
+  expectContains(log, "ret=", "each probe line reports the place/dig return value")
+  expectContains(log, "TILL PROBE: PASS", "the rolled-up probe verdict is PASS (some method worked)")
   expectContains(log, "FERTILIZE: PASS", "fertilized the farmland")
   expectContains(log, "PLANT: PASS", "planted a sulfur seed")
   expectContains(log, "WATER: PASS", "placed a water source with a brace")
@@ -1255,6 +1396,42 @@ T("diag: the SCAN line FAILs and names the probe path when no scanner is present
   expectContains(log, "SCAN: FAIL", "no scanner => SCAN FAIL")
   expectContains(log, "NOT FOUND", "reported the scanner is not found")
   expectContains(log, "captureProbe", "named the slow probe path the build would fall back to")
+end)
+
+-- SEED ROBUSTNESS (deliverable 4): mysticalagriculture:sulfur_seeds is correct (the
+-- _crop->_seeds derivation is right), but the pack disables the crafting-table recipe
+-- (seedCraftingRecipes=false) so AE can neither stock nor autocraft it from a pattern.
+-- A bare "no sulfur_seeds from AE" is not actionable. The diag's AE PULL: seed line
+-- must say EXACTLY what to do - stock/auto-craft via the Seed Infusion Altar - instead
+-- of a bare fail.
+T("diag: a missing sulfur seed reports an actionable 'stock seeds' message", function()
+  local env = CC.new{ turtle = { pos = { x = 0, y = 64, z = 0 },
+    facing = "north", fuel = 50000 } }
+  env.files["farm.conf"] = [[return {
+    origin = { x = 0, y = 0, z = 0 }, size = { w = 1, h = 1, d = 1 },
+    heading = "north", scan_y = 2,
+    start = { x = 0, y = 64, z = 0 }, start_heading = "north",
+    build = { x = 0, y = 0, z = 0 }, plots = 1, fleet = "farm1",
+  }]]
+  -- a full AE EXCEPT the sulfur seed (the operator's exact stock gap)
+  local dirt = { id = "minecraft:dirt", count = 256 }
+  local hoe = env:hoeItem{ durability = 1561 }
+  local fert = env:fertilizerItem{ count = 64 }
+  local water = env:waterBucketItem(); water.count = 16
+  env:addMeBridge("me", { intoTurtle = "north", whenFacing = "north",
+    blockAt = { x = 0, y = 64, z = -1 }, stored = 1e6, max = 2e6,
+    usage = 5, craftSeconds = 1, items = { dirt, hoe, fert, water } }) -- NO seed
+  env:addGeoScanner("scanner")
+  env:setBlock(0, 63, 0, { id = "minecraft:dirt" })
+  current = env
+  local res = env:run(FARM, { "diag" }, { maxTime = 4000 })
+  eq(res.reason, "done", "diag ran (err=" .. tostring(res.err) .. ")")
+  local log = env:file("farm.log") or ""
+  expectContains(log, "AE PULL: seed: FAIL", "the seed pull FAILs (genuinely absent)")
+  -- the actionable guidance, not a bare 'no <id> from AE'
+  expectContains(log, "stock", "tells the operator to stock the seed")
+  expectContains(log, "Seed Infusion Altar", "names where seeds come from (the pack disables crafting)")
+  expectContains(log, "seedCraftingRecipes", "explains WHY AE can't autocraft it")
 end)
 
 T("ae: an empty/disconnected bridge shows 0 item types and PULL FAILED", function()
